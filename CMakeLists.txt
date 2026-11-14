@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(kateagentpanel VERSION 0.1.0 LANGUAGES CXX)
+project(kateagentpanel VERSION 0.2.0 LANGUAGES CXX)
 
 find_package(ECM 6.0 REQUIRED NO_MODULE)
 list(APPEND CMAKE_MODULE_PATH ${ECM_MODULE_PATH})
@@ -10,7 +10,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core Widgets WebEngineWidgets WebChannel)
 find_package(KF6 REQUIRED COMPONENTS CoreAddons TextEditor XmlGui I18n)
-find_package(Python3 REQUIRED COMPONENTS Interpreter)
+find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
 
 kcoreaddons_add_plugin(kateagentpanel INSTALL_NAMESPACE "kf6/ktexteditor")
 target_sources(kateagentpanel PRIVATE src/plugin.cpp src/panel.cpp src/filelink.cpp)
@@ -19,8 +19,9 @@ target_link_libraries(kateagentpanel PRIVATE KF6::TextEditor KF6::CoreAddons KF6
 target_compile_definitions(kateagentpanel PRIVATE TRANSLATION_DOMAIN="kateagentpanel")
 
 file(GLOB_RECURSE PANEL_ASSETS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/web/*")
+set(BRIDGE_ASSETS bridge/agent_bridge.py bridge/session_store.py bridge/dsh_questions.mjs)
 qt_add_resources(kateagentpanel agent_assets PREFIX "/agentpanel" BASE "${CMAKE_CURRENT_SOURCE_DIR}"
-    FILES ${PANEL_ASSETS} bridge/agent_bridge.py bridge/session_store.py bridge/dsh_questions.mjs ui.rc)
+    FILES ${PANEL_ASSETS} ${BRIDGE_ASSETS} ui.rc)
 
 include(CTest)
 if(BUILD_TESTING)
@@ -32,6 +33,12 @@ if(BUILD_TESTING)
     add_test(NAME bridge COMMAND ${Python3_EXECUTABLE} -m unittest discover -s tests -p "test_*.py" -v)
     set_tests_properties(bridge PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
     find_program(NODE_EXECUTABLE node REQUIRED)
+    execute_process(COMMAND ${NODE_EXECUTABLE} -e "if (typeof require('node:module').registerHooks !== 'function') process.exit(1)"
+        RESULT_VARIABLE NODE_HOOKS_RESULT OUTPUT_QUIET ERROR_QUIET)
+    if(NOT NODE_HOOKS_RESULT EQUAL 0)
+        message(FATAL_ERROR "Tests require Node.js 22.15+ or 24+ (module.registerHooks). Set NODE_EXECUTABLE to a supported Node binary.")
+    endif()
+    set_tests_properties(bridge PROPERTIES ENVIRONMENT "KATE_AGENT_TEST_NODE=${NODE_EXECUTABLE}")
     add_test(NAME renderer COMMAND ${NODE_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/renderer_test.cjs)
     add_executable(panel_test tests/panel_test.cpp src/panel.cpp src/filelink.cpp)
     target_include_directories(panel_test PRIVATE src)
@@ -39,7 +46,7 @@ if(BUILD_TESTING)
     target_compile_definitions(panel_test PRIVATE TRANSLATION_DOMAIN="kateagentpanel" SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}" PLUGIN_FILE="$<TARGET_FILE:kateagentpanel>")
     add_dependencies(panel_test kateagentpanel)
     qt_add_resources(panel_test test_assets PREFIX "/agentpanel" BASE "${CMAKE_CURRENT_SOURCE_DIR}"
-        FILES ${PANEL_ASSETS} bridge/agent_bridge.py bridge/session_store.py bridge/dsh_questions.mjs)
+        FILES ${PANEL_ASSETS} ${BRIDGE_ASSETS})
     add_test(NAME panel COMMAND panel_test)
     set_tests_properties(bridge PROPERTIES TIMEOUT 60 LABELS "protocol;offline")
     set_tests_properties(filelink renderer PROPERTIES TIMEOUT 30 LABELS "rendering;offline")

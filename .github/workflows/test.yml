@@ -7,21 +7,28 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python: ['3.10', '3.13']
+        include:
+          - python: '3.10'
+            node: '22.15.0'
+          - python: '3.13'
+            node: '24'
+          - python: '3.14'
+            node: '26'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
       - run: ./scripts/test.sh --unit
   native:
     runs-on: ubuntu-latest
     container: fedora:43
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install build and test dependencies
         run: >-
           dnf install -y gcc-c++ cmake ninja-build extra-cmake-modules
@@ -34,7 +41,7 @@ jobs:
           useradd -m tester
           chown -R tester:tester "$GITHUB_WORKSPACE"
           runuser -u tester -- ./scripts/test.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: native-test-results

@@ -8,32 +8,36 @@
 
 The runner serializes native builds and clears any ambient live-test opt-in. Missing
 Node or Qt Test fails test configuration instead of silently omitting a suite.
+The Node `module.registerHooks` capability is checked before tests run. The runner
+uses Node from `PATH`, or `KATE_AGENT_TEST_NODE`; direct CMake builds can set
+`-DNODE_EXECUTABLE=/path/to/node`.
 Each subprocess test has a deadline and closes its children. CI runs the offline
-suite; no agent package or credential is required.
+suite; no agent package or credential is required. Native tests replace agent
+commands with fixtures, including when real CLIs are installed on the host.
 
-Local validation uses Fedora 45, Qt 6.11.2, and KF6 6.31. GitHub Actions also passed
-the Python 3.10/3.13 unit jobs and the Fedora 43 native suite on 2026-11-14.
-The current offline run passes all five CTest suites, including 86 Python tests
-and 25 Qt test cases; the two real-provider Qt cases are opt-in. Other platforms
+Local validation uses Fedora 45, Qt 6.11.2, and KF6 6.31. The CI matrix covers
+Python/Node pairs 3.10/22.15, 3.13/24, and 3.14/26, plus the Fedora 43 native suite.
+The current offline run passes all five CTest suites, including 91 Python tests
+and 31 Qt test cases; the two real-provider Qt cases are opt-in. Other platforms
 remain unverified.
 
 ## Coverage
 
 | Layer | Checks |
 |---|---|
-| Discovery | Command overrides, argv quoting, credential-name-only inventory, existing Harness profile requirement |
+| Discovery | DSH priority, unavailable-agent fallback, resume precedence, command overrides, argv quoting, malformed overrides, numeric NVM ordering, inherited PATH priority, isolated environments, credential-name-only inventory, existing Harness profile requirement |
 | Transport | Fragmented UTF-8, noisy stdout, oversized records, malformed input, EOF cleanup, busy sends, process-group termination and kill escalation |
 | Sessions | All seven adapters; persistent turns; canonical workspace filtering; read-only metadata imports; cache restart; New Chat; unavailable agents; stale discovery; ACP capability-dependent resume; UTF-8 history limits |
 | Parameters | Native default readback, idle model/effort edits, rejected-value recovery, native changes overriding cached settings, session persistence, ACP updates and legacy model IDs, Codex empty-thread recreation, ZCode model-default reasoning |
-| Interaction | Single/multiple/custom/secret answers, required fields, typed values, dismiss, failed-write retry, permissions, Codex MCP elicitation, server-resolved requests, DSH native socket/hook lifecycle |
+| Interaction | Single/multiple/custom/secret answers, required fields, typed values, dismiss, failed-write retry, permissions, Codex MCP elicitation, server-resolved requests, DSH socket/hook lifecycle, special-character helper paths, existing Node preloads |
 | Native editor | Deferred startup, hidden/visible session restore, host palette/layout preservation, load/unload, resize/hide/show, icon fallbacks, shortcuts, split-view context, Pending, failure recovery, file-link clicks |
 | Focus | First-click composer focus, Esc from composer/transcript/workspace/Pending, dialog dismissal, return to editor, draft/context retention, focus on reopening |
-| Transcript | Left alignment, collapsed process output, visible errors, pinned one/two-line composer, inline Send/Stop, animated working status, elapsed breakdown, Enter/Ctrl+Enter, IME protection, scroll retention, theme/font updates, reload, restored history, local-session dialog |
+| Transcript | Console prompt/body alignment at multiple font sizes, collapsed process output, visible errors, pinned one/two-line composer, inline Send/Stop, small muted working/elapsed text, Enter/Ctrl+Enter, IME protection, scroll retention, theme/font updates, reload, restored history, local-session dialog |
 | Workspace | Active Kate project, local file directory, HOME fallback, New Chat after a manual directory override |
 | Timing | Monotonic wall time, overlapping tool union, user-input waits, zero-duration turns, stop/error outcomes, one persisted summary per turn |
 | Files | Workspace/absolute/file URLs, Unicode/space/percent paths, line/column/range selection, generated round trips, invalid locations and schemes |
 | Rendering | Four math delimiters, matrices, aligned equations, lists/quotes, streaming, errors, code isolation, nested links, KaTeX fonts, escaped HTML and blocked network access |
-| Packaging | Local HTML/font dependencies, licenses, English first-party text |
+| Packaging | Matching release/plugin/protocol versions, local HTML/font dependencies, licenses, English first-party text |
 
 Qt integration tests use real KTextEditor documents/views and WebEngine with a
 small MainWindow test host. They do not replace a manual check in a full Kate window.

@@ -5,14 +5,16 @@ Bring your agent CLIs into Kate's bottom panel, beside Terminal and Diagnostics.
 ## Overview
 
 - A compact, left-aligned conversation using Kate's colors and fonts.
-- A fixed bottom composer with one Send/Stop button and no footer row.
+- A fixed bottom composer with a console-style `>` prompt, aligned message text,
+  one Send/Stop button, and no footer row.
 - Reasoning, tool calls, and logs collapsed under **Process**.
 - Plain **Model ID** and **Reasoning effort** fields populated from the CLI session.
-- Animated working status and a per-turn elapsed-time breakdown.
+- Small, muted working status and a per-turn elapsed-time breakdown.
 - Workspace-matched **Local Sessions**, with CLI labels and automatic resume.
 - Editor selections and cursor lines staged in **Pending**, including unsaved edits.
 - Clickable workspace references and local Markdown/LaTeX rendering.
-- Adapters for Pi, Codex, Claude Code, Kimi Code, Hermes, DeepSeek Harness, and ZCode.
+- DeepSeek Harness (DSH) first in the agent list and selected by default when ready.
+- Adapters for DSH, Pi, Codex, Claude Code, Kimi Code, Hermes, and ZCode.
 
 The plugin discovers installed commands and inherits their environment. Agent
 installation and authentication stay with each CLI. Model and reasoning edits
@@ -96,6 +98,8 @@ To uninstall this user installation, remove
 1. Select an agent and working directory. The default is Kate's active project,
    then the current local file's directory, then your home directory. **New Chat**
    recalculates this default; an existing conversation keeps its original directory.
+   With no session to restore, DSH is selected if its command and ACP profile are
+   available; otherwise, the first available agent is selected.
 2. Add a selection or cursor line through the editor's **Agent Pending** context menu.
    Pending stores a snapshot; double-click an item to edit it.
 3. Model ID and reasoning effort show the CLI's effective values, where reported.
@@ -170,12 +174,12 @@ reasoning effort is not reported by the current control protocol.
 
 | Agent | Transport | Notes |
 |---|---|---|
+| DeepSeek Harness (DSH) | ACP v1 + native question bridge | Default when ready; existing ACP profile; questions use a process-local helper |
 | Pi | RPC | Persistent session, tools, extension confirm/select/input/editor requests |
 | Codex | app-server | Streaming, permissions, user questions |
 | Claude Code | stream-json | Persistent session, permissions, questions |
 | Kimi Code | ACP v1 | Form questions, multiple choice, permissions, resume |
 | Hermes | ACP v1 | Permissions and saved ACP sessions; see compatibility limits below |
-| DeepSeek Harness | ACP v1 + native question bridge | Existing ACP profile; questions use a process-local helper |
 | ZCode | app-server | Persistent process, questions, permissions, resume; new sessions use `build` mode |
 
 Questions appear as explicit choices, multiple selections, or text fields where
@@ -207,6 +211,11 @@ export KATE_AGENT_ZCODE_COMMAND='node /absolute/path/to/zcode.cjs'
 The same override is available for `CODEX`, `CLAUDE`, `KIMI`, `HERMES`, and `DEEPSEEK`.
 Commands are never evaluated by a shell. Agent selection tooltips show detected
 environment variable names, never their values.
+
+Discovery preserves `PATH` priority, then checks common user bin directories and
+installed NVM versions from newest to oldest. It does not source shell startup
+files or change Node versions. If an agent needs a different runtime, use an
+absolute Node path in its command override, or set `PATH` in Kate's launcher.
 
 The development and test scripts accept `KATE_AGENT_BUILD_DIR` and an optional
 `KATE_AGENT_SDK` dependency bundle. A normal system build does not need this bundle.

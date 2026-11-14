@@ -8,6 +8,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ProjectTests(unittest.TestCase):
+    def test_release_versions_match_plugin_and_protocol_handshakes(self):
+        cmake = (ROOT / 'CMakeLists.txt').read_text()
+        version = re.search(r'project\(kateagentpanel VERSION (\S+)', cmake).group(1)
+        metadata = json.loads((ROOT / 'src/plugin.json').read_text())['KPlugin']
+        self.assertEqual(metadata['Version'], version)
+        from test_bridge import module
+        self.assertEqual(module.VERSION, version)
+
     def test_html_and_woff2_font_dependencies_are_shipped_locally(self):
         web = ROOT / 'web'
         html = (web / 'index.html').read_text()

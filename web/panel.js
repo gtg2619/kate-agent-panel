@@ -271,6 +271,7 @@ function receive(event) {
     if (event.fontFamily) style.setProperty("--font-family", `${JSON.stringify(event.fontFamily)}, sans-serif`);
     if (event.fixedFontFamily) style.setProperty("--fixed-font-family", `${JSON.stringify(event.fixedFontFamily)}, monospace`);
     if (event.fontSize > 0) style.setProperty("--font-size", `${event.fontSize}px`);
+    if (event.messageGutter > 0) style.setProperty("--message-gutter", `${event.messageGutter}px`);
     if (event.colorScheme) style.colorScheme = event.colorScheme;
   }
 }

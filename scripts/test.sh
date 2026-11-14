@@ -12,9 +12,16 @@ esac
 cd "$project_dir"
 # Normal tests must never inherit an opt-in to paid model calls.
 unset KATE_AGENT_LIVE_TEST
+test_node="${KATE_AGENT_TEST_NODE:-$(command -v node || true)}"
+if [[ -z "$test_node" ]]; then
+    echo 'Tests require Node.js 22.15+ or 24+ (module.registerHooks).' >&2
+    exit 1
+fi
+"$test_node" -e "if (typeof require('node:module').registerHooks !== 'function') { console.error('Tests require Node.js 22.15+ or 24+ (module.registerHooks).'); process.exit(1); }"
+export KATE_AGENT_TEST_NODE="$test_node"
 if [[ "$mode" == --unit ]]; then
     python3 -m unittest discover -s tests -p 'test_*.py' -v
-    node tests/renderer_test.cjs
+    "$test_node" tests/renderer_test.cjs
     exit
 fi
 mkdir -p "$build_dir"
@@ -22,7 +29,8 @@ build_dir="$(cd -- "$build_dir" && pwd)"
 # Serialize native builds and Xvfb use within this build directory.
 exec 9>"$build_dir/.test.lock"
 flock 9
-cmake_args=(-S "$project_dir" -B "$build_dir" -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Debug)
+cmake_args=(-S "$project_dir" -B "$build_dir" -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Debug
+    -DNODE_EXECUTABLE="$test_node")
 if [[ -f "$sdk_dir/usr/lib64/libQt6WebEngineCore.so.6" ]]; then
     cmake_args+=(-DCMAKE_PREFIX_PATH="$sdk_dir/usr")
     export LD_LIBRARY_PATH="$sdk_dir/usr/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"

@@ -72,6 +72,7 @@ private:
     QWidget *m_pendingRow;
     QListWidget *m_pending;
     QPlainTextEdit *m_input;
+    QLabel *m_prompt = nullptr;
     QToolButton *m_send;
     QToolButton *m_new;
     QToolButton *m_restore;

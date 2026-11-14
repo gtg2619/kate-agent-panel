@@ -8,6 +8,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import signal
@@ -27,14 +28,15 @@ class RPCError(RuntimeError):
         super().__init__(error.get("message", str(error)) if isinstance(error, dict) else str(error))
 
 MAX_RECORD = 16 * 1024 * 1024
+VERSION = "0.2.0"
 AGENTS = {
+    "deepseek": ("DeepSeek Harness", "dsh", "acp"),
     "pi": ("Pi", "pi", "rpc"),
     "hermes": ("Hermes", "hermes", "acp"),
     "codex": ("Codex", "codex", "app-server"),
     "claude": ("Claude Code", "claude", "stream-json"),
     "kimi": ("Kimi Code", "kimi", "acp"),
     "zcode": ("ZCode", "zcode", "app-server"),
-    "deepseek": ("DeepSeek Harness", "dsh", "acp"),
 }
 ENV_KEYS = (
     "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
@@ -50,23 +52,31 @@ def process_environment():
     home = Path.home()
     dirs = [home / ".local/bin", home / ".kimi-code/bin", home / ".cargo/bin",
             home / ".bun/bin", home / ".npm-global/bin"]
-    dirs += sorted((home / ".nvm/versions/node").glob("*/bin"), reverse=True)
-    env["PATH"] = os.pathsep.join([env.get("PATH", "")] + [str(p) for p in dirs if p.is_dir()])
+    # Compare numeric versions (v24 before v9), while preserving the user's PATH priority.
+    versions = []
+    for directory in (home / ".nvm/versions/node").glob("*/bin"):
+        version = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", directory.parent.name)
+        if version:
+            versions.append((tuple(map(int, version.groups())), directory))
+    dirs += [directory for _, directory in sorted(versions, reverse=True)]
+    paths = env["PATH"].split(os.pathsep) if "PATH" in env else os.defpath.split(os.pathsep)
+    paths += [str(p) for p in dirs if p.is_dir()]
+    env["PATH"] = os.pathsep.join(dict.fromkeys(paths))
     return env
 
 
 def command_for(agent, env=None):
-    env = env or process_environment()
+    env = process_environment() if env is None else env
     override = env.get(f"KATE_AGENT_{agent.upper()}_COMMAND", "")
     command = shlex.split(override) if override else [AGENTS[agent][1]]
     if not command:
         return []
-    executable = shutil.which(command[0], path=env.get("PATH"))
+    executable = shutil.which(command[0], path=env.get("PATH", os.defpath))
     return [executable, *command[1:]] if executable else []
 
 
 def inventory(env=None):
-    env = env or process_environment()
+    env = process_environment() if env is None else env
     agents = []
     for key, (name, _, protocol) in AGENTS.items():
         try:
@@ -255,12 +265,13 @@ class Adapter:
         self.emit("status", busy=busy, text=text or ("Working" if busy else "Ready"))
 
     async def launch(self, args, extra_env=None, pass_fds=()):
-        command = command_for(self.agent)
+        env = {**process_environment(), **(extra_env or {})}
+        command = command_for(self.agent, env)
         if not command:
             raise RuntimeError(f"{AGENTS[self.agent][0]} executable not found")
         self.closing = False
         self.process = await asyncio.create_subprocess_exec(
-            *command, *args, cwd=self.cwd, env={**process_environment(), **(extra_env or {})},
+            *command, *args, cwd=self.cwd, env=env,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE, start_new_session=True, limit=MAX_RECORD, pass_fds=pass_fds)
         self.tasks = [asyncio.create_task(self.read_stdout(self.process)), asyncio.create_task(self.read_stderr(self.process))]
@@ -517,7 +528,7 @@ class ACPAdapter(Adapter):
         parent, child = socket.socketpair()
         parent.setblocking(False)
         try:
-            helper = str(Path(__file__).with_name("dsh_questions.mjs"))
+            helper = Path(__file__).resolve().with_name("dsh_questions.mjs").as_uri()
             options = os.environ.get("NODE_OPTIONS", "") + " --import=" + json.dumps(helper, ensure_ascii=False)
             await self.launch(["--profile", "acp"], {"NODE_OPTIONS": options, "KATE_AGENT_DSH_UI_FD": str(child.fileno()),
                 "KATE_AGENT_DSH_UI_OWNER": ""}, pass_fds=(child.fileno(),))
@@ -562,7 +573,7 @@ class ACPAdapter(Adapter):
                 raise RuntimeError("DeepSeek Harness needs an existing ACP profile; automatic configuration is disabled")
             await self.launch_acp()
             hello = await self.rpc("initialize", {"protocolVersion": 1, "clientCapabilities": {"elicitation": {"form": {}}},
-                                        "clientInfo": {"name": "kate-agent-panel", "version": "0.1.0"}})
+                                        "clientInfo": {"name": "kate-agent-panel", "version": VERSION}})
             if hello.get("protocolVersion") != 1:
                 raise RuntimeError("Unsupported ACP protocol version; this panel requires version 1")
             capabilities = hello.get("agentCapabilities", {})
@@ -755,7 +766,7 @@ class CodexAdapter(Adapter):
         if not self.process or self.process.returncode is not None:
             model, effort = self.starting_parameters()
             await self.launch(["app-server"])
-            await self.rpc("initialize", {"clientInfo": {"name": "kate_agent_panel", "title": "Kate Agent Panel", "version": "0.1.0"}, "capabilities": {"experimentalApi": True}})
+            await self.rpc("initialize", {"clientInfo": {"name": "kate_agent_panel", "title": "Kate Agent Panel", "version": VERSION}, "capabilities": {"experimentalApi": True}})
             await self.write({"method": "initialized"})
             if self.session:
                 result = await self.rpc("thread/resume", {"threadId": self.session, "cwd": self.cwd, "excludeTurns": True, **({"model": model} if model else {}),

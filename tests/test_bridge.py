@@ -17,6 +17,41 @@ spec.loader.exec_module(module)
 
 
 class DiscoveryTests(unittest.TestCase):
+    def test_dsh_is_first_even_when_unavailable(self):
+        result = module.inventory({'PATH': ''})
+        self.assertEqual(result['agents'][0]['id'], 'deepseek')
+        self.assertFalse(any(agent['available'] for agent in result['agents']))
+
+    def test_explicit_environment_does_not_inherit_overrides(self):
+        with patch.dict(os.environ, {'KATE_AGENT_PI_COMMAND': sys.executable, 'OPENAI_API_KEY': 'ambient-secret'}), \
+             patch.object(module, 'process_environment', side_effect=AssertionError('Unexpected inheritance')):
+            result = module.inventory({})
+        self.assertEqual(result['overrides'], [])
+        self.assertEqual(result['environment'], [])
+
+    def test_user_path_precedes_numeric_nvm_versions_without_duplicates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            custom = home / 'custom'; custom.mkdir()
+            for version in ('v9.11.2', 'v24.9.0', 'v24.16.0', 'v22.15.0'):
+                (home / '.nvm/versions/node' / version / 'bin').mkdir(parents=True)
+            local = home / '.local/bin'; local.mkdir(parents=True)
+            with patch.object(Path, 'home', return_value=home), \
+                 patch.dict(os.environ, {'PATH': os.pathsep.join((str(custom), str(local), str(custom)))}, clear=True):
+                paths = module.process_environment()['PATH'].split(os.pathsep)
+            self.assertEqual(paths[:2], [str(custom), str(local)])
+            self.assertEqual([Path(p).parent.name for p in paths[2:]], ['v24.16.0', 'v24.9.0', 'v22.15.0', 'v9.11.2'])
+            with patch.object(Path, 'home', return_value=home), patch.dict(os.environ, {}, clear=True):
+                paths = module.process_environment()['PATH'].split(os.pathsep)
+            self.assertEqual(paths[:len(os.defpath.split(os.pathsep))], os.defpath.split(os.pathsep))
+            self.assertNotIn('', paths)
+
+    def test_invalid_override_does_not_break_other_agents(self):
+        result = module.inventory({'PATH': '', 'KATE_AGENT_DEEPSEEK_COMMAND': '"unterminated',
+                                   'KATE_AGENT_PI_COMMAND': shlex.quote(sys.executable)})
+        self.assertIn('quotation', result['agents'][0]['error'])
+        self.assertTrue(next(agent for agent in result['agents'] if agent['id'] == 'pi')['available'])
+
     def test_discovery_does_not_execute_commands_or_read_configuration(self):
         with tempfile.TemporaryDirectory() as directory:
             marker = Path(directory, 'executed')

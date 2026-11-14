@@ -189,16 +189,24 @@ AgentPanel::AgentPanel(KTextEditor::MainWindow *window, QWidget *parent)
     m_input->installEventFilter(this);
     connect(m_input->document(), &QTextDocument::contentsChanged, this, &AgentPanel::updateInputHeight);
     connect(m_input, &QPlainTextEdit::updateRequest, this, [this] { updateInputHeight(); });
-    updateInputHeight();
     auto composer = new QHBoxLayout;
     composer->setContentsMargins(0, 0, 0, 0);
+    composer->setSpacing(0);
+    m_prompt = new QLabel(QStringLiteral(">"), this);
+    m_prompt->setObjectName(QStringLiteral("agentPrompt"));
+    m_prompt->setForegroundRole(QPalette::PlaceholderText);
+    m_prompt->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    m_prompt->setBuddy(m_input);
+    composer->addWidget(m_prompt, 0, Qt::AlignTop);
     composer->addWidget(m_input, 1);
+    composer->addSpacing(4);
     m_send = toolButton(QStringLiteral("mail-send"), i18n("Send"));
     m_send->setObjectName(QStringLiteral("agentSubmit"));
     m_send->setIcon(QIcon::fromTheme(QStringLiteral("mail-send"), style()->standardIcon(QStyle::SP_ArrowForward)));
     m_send->setEnabled(false);
     composer->addWidget(m_send, 0, Qt::AlignBottom);
     outer->addLayout(composer);
+    updateInputHeight();
     setStatus(i18n("Discovering agents…"));
 
     connect(browse, &QToolButton::clicked, this, &AgentPanel::chooseWorkspace);
@@ -536,6 +544,13 @@ void AgentPanel::updateInputHeight()
     const int height = qMax(metrics.height(), metrics.lineSpacing()) * qBound(1, lines, 2)
         + qCeil(m_input->document()->documentMargin() * 2) + m_input->frameWidth() * 2 + 2;
     if (m_input->height() != height) m_input->setFixedHeight(height);
+    if (m_prompt) {
+        // Match the transcript's padding + role column + gap, including the native text inset.
+        const int margin = qCeil(m_input->document()->documentMargin());
+        const int inset = m_input->viewport()->x() + margin;
+        m_prompt->setFixedWidth(16 + qRound(QFontInfo(font()).pixelSize() * 3.5) - inset);
+        m_prompt->setContentsMargins(8, m_input->viewport()->y() + margin, 0, 0);
+    }
 }
 
 void AgentPanel::requestSessions(bool autoResume, bool refresh)
@@ -814,6 +829,7 @@ void AgentPanel::updateTheme()
         {QStringLiteral("selectedText"), palette.color(QPalette::HighlightedText).name()},
         {QStringLiteral("colorScheme"), palette.color(QPalette::Base).lightness() < 128 ? QStringLiteral("dark") : QStringLiteral("light")},
         {QStringLiteral("fontFamily"), QFontInfo(font()).family()}, {QStringLiteral("fontSize"), QFontInfo(font()).pixelSize()},
+        {QStringLiteral("messageGutter"), qRound(QFontInfo(font()).pixelSize() * 3.5)},
         {QStringLiteral("fixedFontFamily"), QFontInfo(QFontDatabase::systemFont(QFontDatabase::FixedFont)).family()}
     }).toJson(QJsonDocument::Compact)));
 }

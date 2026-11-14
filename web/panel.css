@@ -11,6 +11,7 @@
   --font-family: sans-serif;
   --fixed-font-family: monospace;
   --font-size: 13px;
+  --message-gutter: 3.5em;
 }
 * { box-sizing: border-box; }
 html { overflow-anchor: none; }
@@ -18,10 +19,9 @@ body { margin: 0; background: var(--background); color: var(--foreground); font:
 ::selection { background: var(--selection); color: var(--selectedText); }
 #conversation { width: 100%; }
 #empty { padding: 6px 8px; color: var(--muted); }
-.activity, .turn-summary { padding: 5px 8px; color: var(--muted); overflow-wrap: anywhere; }
+.activity, .turn-summary { padding: 4px 8px; font-size: .82em; color: var(--muted); color: color-mix(in srgb, var(--muted) 85%, var(--background)); overflow-wrap: anywhere; }
 .activity-dots { display: inline-block; width: 1.5em; }
-.turn-summary { font-size: .92em; }
-.message { display: grid; grid-template-columns: 3.5em minmax(0, 1fr); column-gap: 8px; padding: 6px 8px; border-bottom: 1px solid color-mix(in srgb, var(--border) 30%, transparent); }
+.message { display: grid; grid-template-columns: var(--message-gutter) minmax(0, 1fr); column-gap: 8px; padding: 6px 8px; border-bottom: 1px solid color-mix(in srgb, var(--border) 30%, transparent); }
 .message > header { color: var(--muted); font-weight: normal; }
 .body { min-width: 0; overflow-wrap: anywhere; }
 .body > :first-child { margin-top: 0; }

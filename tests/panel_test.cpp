@@ -20,9 +20,11 @@
 #include <QFrame>
 #include <QInputMethodEvent>
 #include <QJsonDocument>
+#include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMenu>
+#include <QMap>
 #include <QPlainTextEdit>
 #include <QPluginLoader>
 #include <QPushButton>
@@ -113,6 +115,7 @@ class PanelTest : public QObject
 {
     Q_OBJECT
     std::unique_ptr<QTemporaryDir> m_state;
+    QMap<QByteArray, QByteArray> m_environment;
     QVariant evaluate(QWebEngineView *browser, const QString &script)
     {
         QVariant result;
@@ -141,10 +144,95 @@ class PanelTest : public QObject
 private Q_SLOTS:
     void init()
     {
+        // Offline tests must never connect to a developer's installed agents.
+        for (const auto key : {"KATE_AGENT_STATE_HOME", "KATE_AGENT_DISABLE_NATIVE_DISCOVERY", "DSH_HOME",
+                               "KATE_AGENT_PI_COMMAND", "KATE_AGENT_DEEPSEEK_COMMAND", "KATE_AGENT_CODEX_COMMAND",
+                               "KATE_AGENT_CLAUDE_COMMAND", "KATE_AGENT_KIMI_COMMAND", "KATE_AGENT_HERMES_COMMAND",
+                               "KATE_AGENT_ZCODE_COMMAND"}) m_environment.insert(key, qgetenv(key));
+        for (const auto agent : {"deepseek", "codex", "claude", "kimi", "hermes", "zcode"}) {
+            if (qgetenv("KATE_AGENT_LIVE_TEST") != agent)
+                qputenv((QByteArray("KATE_AGENT_") + QByteArray(agent).toUpper() + "_COMMAND").constData(),
+                        "/nonexistent/kate-agent-test-disabled");
+        }
         m_state = std::make_unique<QTemporaryDir>();
         qputenv("KATE_AGENT_STATE_HOME", m_state->path().toUtf8());
         qputenv("KATE_AGENT_DISABLE_NATIVE_DISCOVERY", "1");
         qputenv("KATE_AGENT_PI_COMMAND", QByteArray("python3 ") + SOURCE_DIR + "/tests/fake_agent.py");
+    }
+
+    void cleanup()
+    {
+        for (auto it = m_environment.cbegin(); it != m_environment.cend(); ++it) {
+            if (it.value().isNull()) qunsetenv(it.key().constData());
+            else qputenv(it.key().constData(), it.value());
+        }
+        m_environment.clear();
+    }
+
+    void defaultAgent_data()
+    {
+        QTest::addColumn<bool>("executable");
+        QTest::addColumn<bool>("profile");
+        QTest::newRow("dsh-ready") << true << true;
+        QTest::newRow("dsh-missing-profile") << true << false;
+        QTest::newRow("dsh-missing-executable") << false << true;
+    }
+
+    void defaultAgent()
+    {
+        QFETCH(bool, executable); QFETCH(bool, profile);
+        QTemporaryDir home;
+        qputenv("DSH_HOME", home.path().toUtf8());
+        if (executable)
+            qputenv("KATE_AGENT_DEEPSEEK_COMMAND", QByteArray("python3 ") + SOURCE_DIR + "/tests/fake_protocol_agent.py acp");
+        if (profile) {
+            QVERIFY(QDir().mkpath(home.path() + QStringLiteral("/profiles/acp")));
+            QFile config(home.path() + QStringLiteral("/profiles/acp/cordis.yml"));
+            QVERIFY(config.open(QIODevice::WriteOnly)); config.write("[]\n"); config.close();
+        }
+        Host host; KTextEditor::MainWindow mainWindow(&host);
+        AgentPanel panel(&mainWindow); panel.resize(900, 400); panel.show();
+        auto agents = panel.findChild<QComboBox *>();
+        auto model = panel.findChild<QLineEdit *>(QStringLiteral("agentModelId"));
+        QTRY_COMPARE(agents->count(), 7);
+        QCOMPARE(agents->itemData(0).toString(), QStringLiteral("deepseek"));
+        QTRY_VERIFY(agents->isEnabled() && model->isEnabled());
+        QCOMPARE(agents->currentData().toString(), executable && profile ? QStringLiteral("deepseek") : QStringLiteral("pi"));
+        QCOMPARE(bool(agents->model()->flags(agents->model()->index(0, 0)) & Qt::ItemIsEnabled), executable && profile);
+    }
+
+    void consoleComposerAlignment_data()
+    {
+        QTest::addColumn<int>("fontPixels");
+        QTest::addColumn<int>("width");
+        QTest::newRow("compact") << 12 << 760;
+        QTest::newRow("standard") << 14 << 1100;
+        QTest::newRow("large-font") << 20 << 1200;
+    }
+
+    void consoleComposerAlignment()
+    {
+        QFETCH(int, fontPixels); QFETCH(int, width);
+        Host host; KTextEditor::MainWindow mainWindow(&host);
+        AgentPanel panel(&mainWindow); panel.resize(width, 450); panel.show();
+        auto browser = panel.findChild<QWebEngineView *>();
+        auto input = panel.findChild<QPlainTextEdit *>();
+        auto prompt = panel.findChild<QLabel *>(QStringLiteral("agentPrompt"));
+        QVERIFY(prompt); QCOMPARE(prompt->text(), QStringLiteral(">"));
+        QVERIFY(waitForScript(browser, QStringLiteral("typeof nativePanel !== 'undefined'")));
+        QFont font = panel.font(); font.setPixelSize(fontPixels); panel.setFont(font);
+        QTRY_COMPARE(evaluate(browser, QStringLiteral("parseFloat(getComputedStyle(document.body).fontSize)")).toInt(), fontPixels);
+        Q_EMIT panel.transcriptEvent(QStringLiteral("{\"type\":\"message\",\"role\":\"user\",\"id\":\"align\",\"text\":\"Message\"}"));
+        QVERIFY(waitForScript(browser, QStringLiteral("!!document.querySelector('.user .body')")));
+        input->setPlainText(QStringLiteral("Draft"));
+        auto textX = [&] { return input->viewport()->mapTo(&panel, input->cursorRect(QTextCursor(input->document())).topLeft()).x(); };
+        auto messageX = [&] { return browser->x() + evaluate(browser, QStringLiteral("document.querySelector('.user .body').getBoundingClientRect().x")).toDouble(); };
+        QTRY_VERIFY2(qAbs(textX() - messageX()) <= 1.5, qPrintable(QStringLiteral("Composer %1, transcript %2").arg(textX()).arg(messageX())));
+        QCOMPARE(prompt->x() + prompt->contentsMargins().left(), browser->x() + 8);
+        input->setPlainText(QStringLiteral("First line\nSecond line\nThird line"));
+        panel.resize(width + 100, 500);
+        QTRY_VERIFY(qAbs(textX() - messageX()) <= 1.5);
+        QVERIFY(panel.height() - input->geometry().bottom() <= 6);
     }
 
     void pluginLoadsAtBottomAndUnloads_data()
@@ -897,11 +985,13 @@ $also literal$
         QTRY_COMPARE(submit->text(), QStringLiteral("Stop"));
         QVERIFY(submit->isEnabled());
         QVERIFY(waitForScript(browser, QStringLiteral("document.querySelector('#conversation > :last-child')?.classList.contains('activity')")));
+        QVERIFY(evaluate(browser, QStringLiteral("parseFloat(getComputedStyle(document.querySelector('.activity')).fontSize) < parseFloat(getComputedStyle(document.body).fontSize) * .9 && getComputedStyle(document.querySelector('.activity')).color !== getComputedStyle(document.body).color")).toBool());
         const auto dots = evaluate(browser, QStringLiteral("document.querySelector('.activity-dots').textContent")).toString();
         QTRY_VERIFY(evaluate(browser, QStringLiteral("document.querySelector('.activity-dots').textContent")).toString() != dots);
         submit->click();
         QTRY_COMPARE(submit->text(), QStringLiteral("Send"));
         QVERIFY(waitForScript(browser, QStringLiteral("!document.querySelector('.activity') && document.querySelector('.turn-summary')?.textContent.includes('Stopped in')")));
+        QVERIFY(evaluate(browser, QStringLiteral("parseFloat(getComputedStyle(document.querySelector('.turn-summary')).fontSize) < parseFloat(getComputedStyle(document.body).fontSize) * .9 && getComputedStyle(document.querySelector('.turn-summary')).color !== getComputedStyle(document.body).color")).toBool());
         input->setPlainText(QStringLiteral("hello")); QTest::keyClick(input, Qt::Key_Return);
         QVERIFY(waitForScript(browser, QStringLiteral("document.querySelectorAll('.turn-summary').length === 2 && [...document.querySelectorAll('.turn-summary')].at(-1).textContent.includes('Completed in')")));
         QVERIFY(panel.grab().save(QStringLiteral(SOURCE_DIR "/build/configuration-preview.png")));
@@ -926,12 +1016,21 @@ $also literal$
             QVERIFY(waitForScript(browser, QStringLiteral("document.querySelector('.assistant .body')?.textContent.includes('Remember this conversation')")));
             QTRY_VERIFY(model->isEnabled());
         }
+        // An available preferred agent must not override the workspace's last Pi session.
+        qputenv("DSH_HOME", m_state->path().toUtf8());
+        QVERIFY(QDir().mkpath(m_state->path() + QStringLiteral("/profiles/acp")));
+        QFile config(m_state->path() + QStringLiteral("/profiles/acp/cordis.yml"));
+        QVERIFY(config.open(QIODevice::WriteOnly)); config.write("[]\n"); config.close();
+        qputenv("KATE_AGENT_DEEPSEEK_COMMAND", QByteArray("python3 ") + SOURCE_DIR + "/tests/fake_protocol_agent.py acp");
         AgentPanel restored(&mainWindow); restored.resize(900, 450); restored.show();
         auto browser = restored.findChild<QWebEngineView *>();
         auto model = restored.findChild<QLineEdit *>(QStringLiteral("agentModelId"));
         QTRY_COMPARE(model->text(), QStringLiteral("saved-model"));
         QCOMPARE(restored.findChild<QLineEdit *>(QStringLiteral("agentReasoningEffort"))->text(), QStringLiteral("low"));
         QCOMPARE(restored.findChild<QComboBox *>()->currentData().toString(), QStringLiteral("pi"));
+        auto agents = restored.findChild<QComboBox *>();
+        QCOMPARE(agents->itemData(0).toString(), QStringLiteral("deepseek"));
+        QVERIFY(agents->model()->flags(agents->model()->index(0, 0)) & Qt::ItemIsEnabled);
         QVERIFY(waitForScript(browser, QStringLiteral("document.querySelector('.assistant .body')?.textContent.includes('Remember this conversation') && document.querySelectorAll('.user').length === 1")));
         auto input = restored.findChild<QPlainTextEdit *>(); input->setPlainText(QStringLiteral("Keep draft"));
         auto sessions = restored.findChild<QToolButton *>(QStringLiteral("agentLocalSessions")); QVERIFY(sessions);
