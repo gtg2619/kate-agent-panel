@@ -46,7 +46,8 @@ private:
     void chooseWorkspace();
     void updateTheme();
     void updatePending();
-    void updateInputHeight();
+    void scheduleComposerLayout();
+    void updateComposerLayout();
     void requestSessions(bool autoResume = false, bool refresh = false);
     void showSessions();
     void updateSessionsView();
@@ -68,6 +69,7 @@ private:
     bool m_loadingSession = false;
     bool m_discovered = false;
     bool m_composing = false;
+    bool m_composerLayoutPending = false;
     QWebEngineView *m_transcript = nullptr;
     QWidget *m_pendingRow;
     QListWidget *m_pending;

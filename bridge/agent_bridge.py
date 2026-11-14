@@ -671,7 +671,10 @@ class ACPAdapter(Adapter):
         await self.connect()
         self.turn = uuid.uuid4().hex
         result = await self.rpc_prompt(text)
-        self.status(False, str(result.get("stopReason", "Ready")))
+        reason = str(result.get("stopReason", "end_turn"))
+        status = {"end_turn": "Ready", "cancelled": "Stopped", "max_tokens": "Token limit reached",
+                  "max_turn_requests": "Turn limit reached", "refusal": "Request declined"}.get(reason, "Turn finished")
+        self.status(False, status)
 
     async def rpc_prompt(self, text):
         # Unlike initialization, a model turn has no arbitrary 60-second timeout.

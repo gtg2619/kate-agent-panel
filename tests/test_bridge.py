@@ -8,7 +8,7 @@ import shlex
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('agent_bridge', ROOT / 'bridge/agent_bridge.py')
@@ -90,6 +90,20 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.events = []
         self.bridge = module.Bridge(self.events.append)
+
+    async def test_acp_stop_reasons_become_readable_status(self):
+        adapter = module.ACPAdapter(self.bridge, 'deepseek', '/tmp')
+        adapter.connect = AsyncMock()
+        for reason, label in [('end_turn', 'Ready'), ('cancelled', 'Stopped'), ('max_tokens', 'Token limit reached'),
+                              ('max_turn_requests', 'Turn limit reached'), ('refusal', 'Request declined'),
+                              ('future_reason', 'Turn finished')]:
+            with self.subTest(reason=reason):
+                adapter.rpc_prompt = AsyncMock(return_value={'stopReason': reason})
+                adapter.status(True)
+                await adapter.send('hello')
+                self.assertEqual(self.events[-1]['text'], label)
+                self.assertFalse(self.events[-1]['busy'])
+                self.assertEqual(self.events[-2]['outcome'], 'stopped' if reason == 'cancelled' else 'completed')
 
     async def test_codex_stream_and_approval(self):
         adapter = module.CodexAdapter(self.bridge, 'codex', '/tmp')

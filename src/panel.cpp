@@ -186,9 +186,11 @@ AgentPanel::AgentPanel(KTextEditor::MainWindow *window, QWidget *parent)
     m_input->setAccessibleName(i18n("Message to agent"));
     m_input->setPlaceholderText(i18n("Ask the agent…   Enter to send, Ctrl+Enter for a new line"));
     m_input->setObjectName(QStringLiteral("agentComposer"));
+    m_input->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_input->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_input->installEventFilter(this);
-    connect(m_input->document(), &QTextDocument::contentsChanged, this, &AgentPanel::updateInputHeight);
-    connect(m_input, &QPlainTextEdit::updateRequest, this, [this] { updateInputHeight(); });
+    m_input->viewport()->installEventFilter(this);
+    connect(m_input->document(), &QTextDocument::contentsChanged, this, &AgentPanel::scheduleComposerLayout);
     auto composer = new QHBoxLayout;
     composer->setContentsMargins(0, 0, 0, 0);
     composer->setSpacing(0);
@@ -200,13 +202,14 @@ AgentPanel::AgentPanel(KTextEditor::MainWindow *window, QWidget *parent)
     composer->addWidget(m_prompt, 0, Qt::AlignTop);
     composer->addWidget(m_input, 1);
     composer->addSpacing(4);
-    m_send = toolButton(QStringLiteral("mail-send"), i18n("Send"));
+    m_send = toolButton(QStringLiteral("go-up"), i18n("Send"));
     m_send->setObjectName(QStringLiteral("agentSubmit"));
-    m_send->setIcon(QIcon::fromTheme(QStringLiteral("mail-send"), style()->standardIcon(QStyle::SP_ArrowForward)));
+    m_send->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    m_send->setIcon(QIcon::fromTheme(QStringLiteral("go-up"), style()->standardIcon(QStyle::SP_ArrowUp)));
     m_send->setEnabled(false);
     composer->addWidget(m_send, 0, Qt::AlignBottom);
     outer->addLayout(composer);
-    updateInputHeight();
+    scheduleComposerLayout();
     setStatus(i18n("Discovering agents…"));
 
     connect(browse, &QToolButton::clicked, this, &AgentPanel::chooseWorkspace);
@@ -394,7 +397,9 @@ void AgentPanel::syncWorkspace()
 
 void AgentPanel::setStatus(const QString &text, bool error)
 {
-    m_send->setToolTip((m_busy ? i18n("Stop") : i18n("Send")) + QLatin1Char('\n') + text);
+    const auto action = m_busy ? i18n("Stop") : i18n("Send (Enter)");
+    const bool idle = text.isEmpty() || text == i18n("Ready") || text == i18n("Stopped");
+    m_send->setToolTip(idle ? action : QStringLiteral("<b>%1</b><br/>%2").arg(action.toHtmlEscaped(), text.toHtmlEscaped()));
     m_send->setAccessibleDescription(text);
     if (error) event({{QStringLiteral("type"), QStringLiteral("error")}, {QStringLiteral("text"), text}});
 }
@@ -514,9 +519,11 @@ void AgentPanel::resetSession(bool forgetLast)
 
 bool AgentPanel::eventFilter(QObject *object, QEvent *event)
 {
+    if (object == m_input->viewport() && event->type() == QEvent::Resize) scheduleComposerLayout();
     if (object == m_input) {
         if (event->type() == QEvent::InputMethod) m_composing = !static_cast<QInputMethodEvent *>(event)->preeditString().isEmpty();
-        if (event->type() == QEvent::Resize) QTimer::singleShot(0, this, &AgentPanel::updateInputHeight);
+        if (event->type() == QEvent::Resize || event->type() == QEvent::FontChange || event->type() == QEvent::StyleChange)
+            scheduleComposerLayout();
         if (event->type() == QEvent::KeyPress && !m_composing) {
             auto key = static_cast<QKeyEvent *>(event);
             if (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter) {
@@ -535,22 +542,52 @@ bool AgentPanel::eventFilter(QObject *object, QEvent *event)
     return QWidget::eventFilter(object, event);
 }
 
-void AgentPanel::updateInputHeight()
+void AgentPanel::scheduleComposerLayout()
 {
+    if (m_composerLayoutPending) return;
+    m_composerLayoutPending = true;
+    QTimer::singleShot(0, this, [this] {
+        m_composerLayoutPending = false;
+        updateComposerLayout();
+    });
+}
+
+void AgentPanel::updateComposerLayout()
+{
+    // Never resize from updateRequest or while Qt is editing/laying out the document.
+    // Measure at most two lines independently of QPlainTextEdit's lazy block layout.
     int lines = 0;
-    for (auto block = m_input->document()->begin(); block.isValid() && lines < 2; block = block.next())
-        lines += qMax(1, block.layout()->lineCount());
+    qreal textHeight = 0;
+    const qreal margin = m_input->document()->documentMargin();
+    const qreal width = qMax(1.0, m_input->viewport()->width() - 2 * margin);
+    for (auto block = m_input->document()->begin(); block.isValid() && lines < 2; block = block.next()) {
+        QTextLayout measurement(block.text(), m_input->font());
+        measurement.setTextOption(m_input->document()->defaultTextOption());
+        measurement.beginLayout();
+        while (lines < 2) {
+            auto line = measurement.createLine();
+            if (!line.isValid()) break;
+            line.setLeadingIncluded(true);
+            line.setLineWidth(width);
+            textHeight += line.height();
+            ++lines;
+        }
+        measurement.endLayout();
+    }
     const QFontMetrics metrics(m_input->font());
-    const int height = qMax(metrics.height(), metrics.lineSpacing()) * qBound(1, lines, 2)
-        + qCeil(m_input->document()->documentMargin() * 2) + m_input->frameWidth() * 2 + 2;
+    textHeight = qMax(textHeight, qreal(qMax(metrics.height(), metrics.lineSpacing()) * qBound(1, lines, 2)));
+    const int height = qCeil(textHeight + 2 * margin) + m_input->height() - m_input->viewport()->height() + 2;
     if (m_input->height() != height) m_input->setFixedHeight(height);
     if (m_prompt) {
         // Match the transcript's padding + role column + gap, including the native text inset.
-        const int margin = qCeil(m_input->document()->documentMargin());
-        const int inset = m_input->viewport()->x() + margin;
+        const int inset = m_input->viewport()->x() + qCeil(margin);
         m_prompt->setFixedWidth(16 + qRound(QFontInfo(font()).pixelSize() * 3.5) - inset);
-        m_prompt->setContentsMargins(8, m_input->viewport()->y() + margin, 0, 0);
+        m_prompt->setContentsMargins(8, m_input->viewport()->y() + qCeil(margin), 0, 0);
     }
+    const int iconSize = style()->pixelMetric(QStyle::PM_SmallIconSize);
+    m_send->setIconSize(QSize(iconSize, iconSize));
+    m_send->setFixedSize(QSize(iconSize + 8, iconSize + 8));
+    m_input->ensureCursorVisible();
 }
 
 void AgentPanel::requestSessions(bool autoResume, bool refresh)
@@ -740,8 +777,8 @@ void AgentPanel::event(const QJsonObject &object)
         m_busy = object.value(QStringLiteral("busy")).toBool();
         setStatus(object.value(QStringLiteral("text")).toString());
         m_send->setEnabled((m_busy || !m_loadingSession) && m_agents->currentIndex() >= 0 && m_process->state() == QProcess::Running);
-        m_send->setIcon(m_busy ? QIcon::fromTheme(QStringLiteral("process-stop"), style()->standardIcon(QStyle::SP_MediaStop))
-            : QIcon::fromTheme(QStringLiteral("mail-send"), style()->standardIcon(QStyle::SP_ArrowForward)));
+        m_send->setIcon(m_busy ? QIcon::fromTheme(QStringLiteral("media-playback-stop"), style()->standardIcon(QStyle::SP_MediaStop))
+            : QIcon::fromTheme(QStringLiteral("go-up"), style()->standardIcon(QStyle::SP_ArrowUp)));
         m_send->setText(m_busy ? i18n("Stop") : i18n("Send"));
         m_send->setAccessibleName(m_send->text());
         m_agents->setEnabled(!m_busy && !m_loadingSession);
@@ -817,7 +854,7 @@ void AgentPanel::updateTheme()
     const auto palette = this->palette();
     m_transcript->page()->setBackgroundColor(palette.color(QPalette::Base));
     if (!m_ready) return;
-    updateInputHeight();
+    scheduleComposerLayout();
     updatePending();
     Q_EMIT transcriptEvent(QString::fromUtf8(QJsonDocument(QJsonObject{
         {QStringLiteral("type"), QStringLiteral("theme")}, {QStringLiteral("background"), palette.color(QPalette::Base).name()},

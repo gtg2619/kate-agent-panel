@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Defer and coalesce composer resizing outside document editing and repaint callbacks.
+- Measure wrapped text independently and keep the cursor visible after manual newlines.
+- Use distinct arrow/stop icons and remove raw ACP completion codes from button hints.
+
 ## 0.2.0
 
 - Prefer DeepSeek Harness when no session is restored; keep unavailable agents visible.

@@ -903,6 +903,64 @@ $also literal$
         QVERIFY(!input->toPlainText().isEmpty());
     }
 
+    void multilineComposerCursorVisible_data()
+    {
+        QTest::addColumn<bool>("paddedStyle");
+        QTest::addColumn<QString>("firstLine");
+        QTest::newRow("native") << false << QStringLiteral("First line");
+        QTest::newRow("padded-style") << true << QStringLiteral("First line");
+        QTest::newRow("font-fallback") << false << QString::fromUtf8("\xe4\xb8\xad\xe6\x96\x87 \xf0\x9f\x98\x80");
+        QTest::newRow("padded-font-fallback") << true << QString::fromUtf8("\xe4\xb8\xad\xe6\x96\x87 \xf0\x9f\x98\x80");
+    }
+
+    void multilineComposerCursorVisible()
+    {
+        QFETCH(bool, paddedStyle);
+        QFETCH(QString, firstLine);
+        Host host; KTextEditor::MainWindow mainWindow(&host);
+        AgentPanel panel(&mainWindow); panel.resize(950, 400); panel.show(); panel.activateWindow();
+        auto input = panel.findChild<QPlainTextEdit *>();
+        if (paddedStyle) input->setStyleSheet(QStringLiteral("QPlainTextEdit { padding: 6px 8px; border: 1px solid palette(mid); }"));
+        input->setFocus(); QTRY_VERIFY(input->hasFocus());
+        input->insertPlainText(firstLine);
+        QTest::keyClick(input, Qt::Key_Return, Qt::ControlModifier);
+        QCOMPARE(input->toPlainText(), firstLine + QLatin1Char('\n'));
+        QTRY_VERIFY2(input->viewport()->rect().contains(input->cursorRect()),
+            qPrintable(QStringLiteral("Cursor y=%1 h=%2, viewport h=%3").arg(input->cursorRect().y()).arg(input->cursorRect().height()).arg(input->viewport()->height())));
+        QTest::keyClicks(input, "Second line");
+        QTRY_VERIFY(input->viewport()->rect().contains(input->cursorRect()));
+        QTRY_VERIFY(input->viewport()->rect().contains(input->cursorRect(QTextCursor(input->document()))));
+        const int twoLines = input->height();
+        QSignalSpy paints(input, &QPlainTextEdit::updateRequest);
+        QTest::keyClick(input, Qt::Key_Return, Qt::ControlModifier);
+        QTest::keyClicks(input, "Third line");
+        QTRY_VERIFY(input->viewport()->rect().contains(input->cursorRect()));
+        QTRY_COMPARE(input->height(), twoLines);
+        QTest::qWait(150);
+        QVERIFY2(paints.size() < 100, "The composer must settle without a paint/resize feedback loop");
+        input->setPlainText(QStringLiteral("Already\nmanually\nwrapped\ntext"));
+        input->moveCursor(QTextCursor::End);
+        for (int i = 0; i < 10; ++i) {
+            QTest::keyClick(input, Qt::Key_Return, Qt::ControlModifier);
+            QTRY_VERIFY(input->viewport()->rect().contains(input->cursorRect()));
+        }
+        QCOMPARE(input->document()->blockCount(), 14);
+        input->undo();
+        QTRY_VERIFY(input->viewport()->rect().contains(input->cursorRect()));
+        input->redo();
+        QTRY_VERIFY(input->viewport()->rect().contains(input->cursorRect()));
+        // Repeatedly cross the wrap threshold, then insert a paragraph beyond it.
+        for (int count = 100; count < 125; ++count) {
+            input->setPlainText(QString(count, QLatin1Char('W')));
+            input->moveCursor(QTextCursor::End);
+            QTest::keyClick(input, Qt::Key_Return, Qt::ControlModifier);
+            QTest::keyClicks(input, "Last line");
+            QTRY_VERIFY(input->viewport()->rect().contains(input->cursorRect()));
+            QTRY_VERIFY(input->height() <= twoLines);
+            input->clear();
+        }
+    }
+
     void effectiveConfigurationUpdatesBeforeSending()
     {
         Host host; KTextEditor::MainWindow mainWindow(&host);
@@ -982,6 +1040,8 @@ $also literal$
         QCOMPARE(submit->geometry().bottom(), input->geometry().bottom());
         QVERIFY(panel.height() - input->geometry().bottom() <= 6);
         QVERIFY(!submit->icon().isNull());
+        QCOMPARE(submit->toolButtonStyle(), Qt::ToolButtonIconOnly);
+        QVERIFY(submit->width() >= submit->iconSize().width() + 8);
         input->setPlainText(QStringLiteral("hang")); QTest::keyClick(input, Qt::Key_Return);
         QTRY_COMPARE(submit->text(), QStringLiteral("Stop"));
         QVERIFY(submit->isEnabled());
@@ -991,6 +1051,7 @@ $also literal$
         QTRY_VERIFY(evaluate(browser, QStringLiteral("document.querySelector('.activity-dots').textContent")).toString() != dots);
         submit->click();
         QTRY_COMPARE(submit->text(), QStringLiteral("Send"));
+        QCOMPARE(submit->toolTip(), QStringLiteral("Send (Enter)"));
         QVERIFY(waitForScript(browser, QStringLiteral("!document.querySelector('.activity') && document.querySelector('.turn-summary')?.textContent.includes('Stopped in')")));
         QVERIFY(evaluate(browser, QStringLiteral("parseFloat(getComputedStyle(document.querySelector('.turn-summary')).fontSize) < parseFloat(getComputedStyle(document.body).fontSize) * .9 && getComputedStyle(document.querySelector('.turn-summary')).color !== getComputedStyle(document.body).color")).toBool());
         input->setPlainText(QStringLiteral("hello")); QTest::keyClick(input, Qt::Key_Return);

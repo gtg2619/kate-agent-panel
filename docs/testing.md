@@ -17,8 +17,8 @@ commands with fixtures, including when real CLIs are installed on the host.
 
 Local validation uses Fedora 45, Qt 6.11.2, and KF6 6.31. The CI matrix covers
 Python/Node pairs 3.10/22.15, 3.13/24, and 3.14/26, plus the Fedora 43 native suite.
-The current offline run passes all five CTest suites, including 91 Python tests
-and 32 Qt test cases; the two real-provider Qt cases are opt-in. Other platforms
+The current offline run passes all five CTest suites, including 92 Python tests
+and 36 Qt test cases; the two real-provider Qt cases are opt-in. Other platforms
 remain unverified.
 
 ## Coverage
@@ -34,6 +34,7 @@ remain unverified.
 | Focus | First-click composer focus, Esc from composer/transcript/workspace/Pending, dialog dismissal, return to editor, draft/context retention, focus on reopening |
 | Transcript | Console prompt/body alignment at multiple font sizes, collapsed process output, visible errors, pinned one/two-line composer, inline Send/Stop, small muted working/elapsed text, Enter/Ctrl+Enter, IME protection, scroll retention, theme/font updates, reload, restored history, local-session dialog |
 | Workspace | Active Kate project, local file directory, HOME fallback, New Chat after a manual directory override |
+| Composer regression | Repeated Ctrl+Enter in existing multiline text, cursor visibility, undo/redo, wrap thresholds, padded styles, font fallback, bounded repaint activity, distinct icons and readable completion hints |
 | Timing | Monotonic wall time, overlapping tool union, user-input waits, zero-duration turns, stop/error outcomes, one persisted summary per turn |
 | Files | Workspace/absolute/file URLs, Unicode/space/percent paths, line/column/range selection, generated round trips, invalid locations and schemes |
 | Rendering | Four math delimiters, matrices, aligned equations, lists/quotes, streaming, errors, code isolation, nested links, KaTeX fonts, escaped HTML and blocked network access |
@@ -54,6 +55,11 @@ WebEngine initialization until after window restoration preserved the dark theme
 For a manual regression check, select Breeze Dark, enable Agent Panel, restart Kate
 with the panel hidden and visible, then open it and press Esc from the composer and
 transcript. Check the document tree and toolbar before and after opening the panel.
+
+The multiline composer regression also passed at 200% scaling and in a full Kate
+window on GNOME/Wayland. The reported complete freeze was not reproduced locally;
+the fix removes synchronous resizing from document/repaint callbacks and tests
+cursor visibility after repeated manual line breaks.
 
 Unicode cases use escaped data; project UI, documentation, and test descriptions are English.
 
