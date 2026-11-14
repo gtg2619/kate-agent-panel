@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Match Process headings and expanded content to the small, muted turn-timing text.
 - Defer and coalesce composer resizing outside document editing and repaint callbacks.
 - Measure wrapped text independently and keep the cursor visible after manual newlines.
 - Use distinct arrow/stop icons and remove raw ACP completion codes from button hints.

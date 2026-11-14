@@ -19,7 +19,8 @@ body { margin: 0; background: var(--background); color: var(--foreground); font:
 ::selection { background: var(--selection); color: var(--selectedText); }
 #conversation { width: 100%; }
 #empty { padding: 6px 8px; color: var(--muted); }
-.activity, .turn-summary { padding: 4px 8px; font-size: .82em; color: var(--muted); color: color-mix(in srgb, var(--muted) 85%, var(--background)); overflow-wrap: anywhere; }
+.activity, .turn-summary, .process { font-size: .82em; color: var(--muted); color: color-mix(in srgb, var(--muted) 85%, var(--background)); }
+.activity, .turn-summary { padding: 4px 8px; overflow-wrap: anywhere; }
 .activity-dots { display: inline-block; width: 1.5em; }
 .message { display: grid; grid-template-columns: var(--message-gutter) minmax(0, 1fr); column-gap: 8px; padding: 6px 8px; border-bottom: 1px solid color-mix(in srgb, var(--border) 30%, transparent); }
 .message > header { color: var(--muted); font-weight: normal; }
@@ -48,6 +49,9 @@ summary:focus-visible, a:focus-visible, button:focus-visible { outline: 1px soli
 .process-body { padding: 4px 0 0 16px; }
 .process .message { display: block; padding: 4px 0; border: 0; }
 .process .message > header { margin-bottom: 3px; }
+.process summary, .process .message > header, .process a { color: inherit; }
+.process :is(h1, h2, h3, h4, h5, h6, .katex) { font-size: 1em; }
+.process :is(h1, h2, h3, h4, h5, h6, strong, b, th) { font-weight: normal; }
 .attachment { grid-column: 2; margin-top: 4px; }
 .request { padding: 6px 8px; border-bottom: 1px solid var(--border); }
 .request strong { display: block; margin-bottom: 6px; font-weight: 600; white-space: pre-wrap; }
