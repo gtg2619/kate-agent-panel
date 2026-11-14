@@ -208,10 +208,10 @@ class SessionLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(items[0]['title'],'Recent question')
         self.assertEqual(items[0]['updated'],1700000000)
 
-    async def test_model_change_restarts_process_but_keeps_native_session(self):
+    async def test_model_change_before_launch_keeps_native_session(self):
         a = module.PiAdapter(self.bridge,'pi',self.cwd); self.bridge.adapter = a; a.session = 's'
         a.close, a.send = AsyncMock(), AsyncMock()
         await self.bridge.dispatch(dict(type='send',agent='pi',cwd=self.cwd,text='hello',model='next',effort='high'))
-        a.close.assert_awaited_once(); a.send.assert_awaited_once_with('hello')
+        a.close.assert_not_awaited(); a.send.assert_awaited_once_with('hello')
         self.assertEqual((a.session,a.model,a.effort),('s','next','high'))
         a.close = AsyncMock()

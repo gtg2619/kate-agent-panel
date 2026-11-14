@@ -62,7 +62,21 @@
   const looksLikePath = text => (pathPattern.test(text) || /^[^\n\r<>"|:*?]+:L\d+(?:-L?\d+)?$/.test(text) ||
     (text.includes("/") && /^[^\n\r<>"|:*?]+\.[A-Za-z0-9_-]+(?::L\d+(?:-L?\d+)?|:\d+(?::\d+)?|#L\d+(?:C\d+)?(?:-L\d+)?)?$/.test(text))) &&
     !/^[a-z]+:\/\//i.test(text) && !/^[\d.]+$/.test(text);
-  const fileAnchor = (text, code = false) => `<a class="file-link" href="agent-file:${encodeURIComponent(text)}">${code ? "<code>" : ""}${escape(text)}${code ? "</code>" : ""}</a>`;
+  const fileAnchor = (text, code = false, label = text) => `<a class="file-link" href="agent-file:${encodeURIComponent(text)}">${code ? "<code>" : ""}${escape(label)}${code ? "</code>" : ""}</a>`;
+  // CLIs sometimes emit Markdown destinations with literal spaces. Recover only
+  // explicit local file links; code, network URLs, and nested links keep normal parsing.
+  md.inline.ruler.before("link", "agent_spaced_file_link", (state, silent) => {
+    if (state.linkLevel || state.src[state.pos] !== "[" || state.src[state.pos - 1] === "!") return false;
+    const match = /^\[([^\]\r\n]+)\]\(([^()\r\n]+)\)/.exec(state.src.slice(state.pos));
+    if (!match || !/\s/.test(match[2]) || !looksLikePath(match[2])) return false;
+    if (!silent) {
+      const token = state.push("agent_spaced_file_link", "", 0);
+      token.content = match[2]; token.meta = {label: match[1]};
+    }
+    state.pos += match[0].length;
+    return true;
+  });
+  md.renderer.rules.agent_spaced_file_link = (tokens, i) => fileAnchor(tokens[i].content, false, tokens[i].meta.label);
   md.renderer.rules.code_inline = (tokens, i) => {
     const text = tokens[i].content;
     return !tokens[i].meta?.insideLink && looksLikePath(text) ? fileAnchor(text, true) : `<code>${escape(text)}</code>`;

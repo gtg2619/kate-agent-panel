@@ -48,6 +48,8 @@ class ParameterTests(unittest.IsolatedAsyncioTestCase):
             async def write(data):
                 if data.get('type') == 'control_request':
                     a.waiters[data['request_id']].set_result({})
+                elif data.get('type') == 'get_state':
+                    a.waiters[data['id']].set_result({})
             a.write = write
             await a.send('hello')
             args = self.calls[0][1]

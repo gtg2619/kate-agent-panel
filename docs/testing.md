@@ -13,8 +13,8 @@ suite; no agent package or credential is required.
 
 Local validation uses Fedora 45, Qt 6.11.2, and KF6 6.31. GitHub Actions also passed
 the Python 3.10/3.13 unit jobs and the Fedora 43 native suite on 2026-11-14.
-The current offline run passes all five CTest suites, including 75 Python tests
-and 22 Qt test cases; the two real-provider Qt cases are opt-in. Other platforms
+The current offline run passes all five CTest suites, including 86 Python tests
+and 25 Qt test cases; the two real-provider Qt cases are opt-in. Other platforms
 remain unverified.
 
 ## Coverage
@@ -24,11 +24,13 @@ remain unverified.
 | Discovery | Command overrides, argv quoting, credential-name-only inventory, existing Harness profile requirement |
 | Transport | Fragmented UTF-8, noisy stdout, oversized records, malformed input, EOF cleanup, busy sends, process-group termination and kill escalation |
 | Sessions | All seven adapters; persistent turns; canonical workspace filtering; read-only metadata imports; cache restart; New Chat; unavailable agents; stale discovery; ACP capability-dependent resume; UTF-8 history limits |
-| Parameters | Blank defaults, model/effort forwarding, process restart with session preservation, ACP config IDs, unsupported effort, ZCode model-default reasoning and session-only updates |
+| Parameters | Native default readback, idle model/effort edits, rejected-value recovery, native changes overriding cached settings, session persistence, ACP updates and legacy model IDs, Codex empty-thread recreation, ZCode model-default reasoning |
 | Interaction | Single/multiple/custom/secret answers, required fields, typed values, dismiss, failed-write retry, permissions, Codex MCP elicitation, server-resolved requests, DSH native socket/hook lifecycle |
 | Native editor | Deferred startup, hidden/visible session restore, host palette/layout preservation, load/unload, resize/hide/show, icon fallbacks, shortcuts, split-view context, Pending, failure recovery, file-link clicks |
 | Focus | First-click composer focus, Esc from composer/transcript/workspace/Pending, dialog dismissal, return to editor, draft/context retention, focus on reopening |
-| Transcript | Left alignment, collapsed process output, visible errors, pinned one/two-line composer, Enter/Ctrl+Enter, IME protection, scroll retention, theme/font updates, reload, restored history, local-session dialog |
+| Transcript | Left alignment, collapsed process output, visible errors, pinned one/two-line composer, inline Send/Stop, animated working status, elapsed breakdown, Enter/Ctrl+Enter, IME protection, scroll retention, theme/font updates, reload, restored history, local-session dialog |
+| Workspace | Active Kate project, local file directory, HOME fallback, New Chat after a manual directory override |
+| Timing | Monotonic wall time, overlapping tool union, user-input waits, zero-duration turns, stop/error outcomes, one persisted summary per turn |
 | Files | Workspace/absolute/file URLs, Unicode/space/percent paths, line/column/range selection, generated round trips, invalid locations and schemes |
 | Rendering | Four math delimiters, matrices, aligned equations, lists/quotes, streaming, errors, code isolation, nested links, KaTeX fonts, escaped HTML and blocked network access |
 | Packaging | Local HTML/font dependencies, licenses, English first-party text |
@@ -69,11 +71,13 @@ No permission is auto-approved.
 ZCode needs a configured provider; the test does not create one.
 
 Verified locally on 2026-11-14: ZCode CLI 0.17.1 and DeepSeek Harness 0.2.2-rc.1,
-using `deepseek-flash`. ZCode used a temporary provider outside the repository.
+using the configured DeepSeek Flash models. ZCode used a temporary provider outside the repository.
 Additional real-provider probes exercised a model override, a native single-choice
 question answered through the panel bridge, process shutdown, and restored-session
-memory. Neither probe changed the original CLI configuration. The first turn took
-about 3-5 seconds locally, including provider latency; this is not a benchmark.
+memory. DSH also passed native model/effort readback, an idle model change, and
+configuration readback after a cold ACP resume. Pi, Codex, and Claude reported their
+default models without a conversation prompt; Codex accepted an idle effort change.
+These probes did not rewrite the original CLI configuration files.
 
 Kimi's real ACP initialization/config surface and workspace-filtered session listing
 were checked. Codex 0.167.2 protocol types, Pi 1.5.0 RPC types, Claude's control
@@ -83,7 +87,8 @@ approvals, and live cancellation remain unverified. Fixtures do not establish
 compatibility with every CLI version.
 
 Cached-session tests hold native discovery indefinitely and verify that history is
-restored and input becomes ready first. The CLI process is not started until Send.
+restored first. The selected CLI then connects asynchronously to read its effective
+configuration. Unselected CLIs are not launched for configuration discovery.
 Metadata discovery runs outside the bridge event loop; Kimi's listing has a three
 second deadline. Discovery scans at most 2,000 candidate records per file/database
 source and keeps the newest 500 matching sessions. The panel caches recent history;

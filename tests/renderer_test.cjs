@@ -50,4 +50,12 @@ for (const reference of ['project/src/\u4e2d\u6587.cpp:L123-234', '\u9879\u76ee/
   assert.ok(render(`See ${reference} please.`).includes(`agent-file:${encodeURIComponent(reference)}`), reference);
 }
 assert.ok(render('`project/src/\u4e2d\u6587 file%20.cpp:L123-234`').includes(`agent-file:${encodeURIComponent('project/src/\u4e2d\u6587 file%20.cpp:L123-234')}`));
+const spaced = 'project/src/\u4f8b\u5b50 file%20.cpp:L123-234';
+const spacedLink = render(`[${spaced}](${spaced})`);
+assert.ok(spacedLink.includes(`agent-file:${encodeURIComponent(spaced)}`));
+assert.equal((spacedLink.match(/<a /g) || []).length, 1);
+assert.doesNotMatch(render(`\`[label](${spaced})\``), /<a /);
+assert.doesNotMatch(render(`\`\`\`text\n[label](${spaced})\n\`\`\``), /<a /);
+assert.doesNotMatch(render('[label](javascript:alert bad)'), /href="(?:javascript|agent-file):/);
+assert.doesNotMatch(render('[label](https://example.com/a file.cpp)'), /agent-file:https/);
 console.log('Renderer: math, code isolation, workspace ranges, links, and untrusted input passed');

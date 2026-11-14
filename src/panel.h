@@ -50,6 +50,9 @@ private:
     void requestSessions(bool autoResume = false, bool refresh = false);
     void showSessions();
     void updateSessionsView();
+    void requestConfiguration(bool apply = false);
+    void watchProject(QObject *project);
+    void setStatus(const QString &text, bool error = false);
     QString inferWorkspace() const;
     QString workspace() const;
     KTextEditor::MainWindow *m_window;
@@ -69,11 +72,9 @@ private:
     QWidget *m_pendingRow;
     QListWidget *m_pending;
     QPlainTextEdit *m_input;
-    QLabel *m_status;
-    QPushButton *m_send;
-    QPushButton *m_stop;
+    QToolButton *m_send;
     QToolButton *m_new;
-    QPushButton *m_restore;
+    QToolButton *m_restore;
     QProcess *m_process;
     QTemporaryDir m_bridgeDirectory;
     QByteArray m_buffer;
@@ -86,6 +87,14 @@ private:
     QString m_sessionWorkspace;
     QString m_lastDraft;
     QList<QPair<QString, QString>> m_lastPending;
+    QString m_configurationRequest;
+    QString m_appliedModel;
+    QString m_appliedEffort;
+    bool m_loadingConfiguration = false;
+    bool m_sendWhenConfigured = false;
+    bool m_configurationFailed = false;
+private Q_SLOTS:
+    void syncWorkspace();
 };
 
 // Expose only transcript operations to JavaScript, not QWidget's inherited slots/properties.

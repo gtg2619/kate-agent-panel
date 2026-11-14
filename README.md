@@ -5,16 +5,19 @@ Bring your agent CLIs into Kate's bottom panel, beside Terminal and Diagnostics.
 ## Overview
 
 - A compact, left-aligned conversation using Kate's colors and fonts.
-- A fixed bottom composer, with reasoning, tool calls, and logs collapsed under **Process**.
-- Plain **Model ID** and **Reasoning effort** fields, without completion.
+- A fixed bottom composer with one Send/Stop button and no footer row.
+- Reasoning, tool calls, and logs collapsed under **Process**.
+- Plain **Model ID** and **Reasoning effort** fields populated from the CLI session.
+- Animated working status and a per-turn elapsed-time breakdown.
 - Workspace-matched **Local Sessions**, with CLI labels and automatic resume.
 - Editor selections and cursor lines staged in **Pending**, including unsaved edits.
 - Clickable workspace references and local Markdown/LaTeX rendering.
 - Adapters for Pi, Codex, Claude Code, Kimi Code, Hermes, DeepSeek Harness, and ZCode.
 
 The plugin discovers installed commands and inherits their environment. Agent
-installation, authentication, and configuration stay with each CLI. Model overrides
-apply to the selected session; empty fields use the CLI's session or model defaults.
+installation and authentication stay with each CLI. Model and reasoning edits
+apply through the CLI to the selected session and are saved with its history.
+The panel does not rewrite global CLI configuration files.
 
 ## Screenshot
 
@@ -90,16 +93,27 @@ To uninstall this user installation, remove
 
 ## Usage
 
-1. Select an agent and working directory. The default is the nearest `.git` or
-   `.kateproject` directory, falling back to the current file's directory.
+1. Select an agent and working directory. The default is Kate's active project,
+   then the current local file's directory, then your home directory. **New Chat**
+   recalculates this default; an existing conversation keeps its original directory.
 2. Add a selection or cursor line through the editor's **Agent Pending** context menu.
    Pending stores a snapshot; double-click an item to edit it.
-3. Optionally enter a model ID and reasoning effort. Send with **Enter**; use
+3. Model ID and reasoning effort show the CLI's effective values, where reported.
+   Edit either field and press **Tab** or **Enter** to apply it to the session.
+   The CLI validates changes and returns the resulting values. Send with **Enter**; use
    **Ctrl+Enter** for a new line. The composer grows from one to two visible lines.
    You can prepare the next draft while a turn runs.
-   **Stop** terminates this panel's agent process group. Failed sends can be restored.
+   The button to the right of the input switches between **Send** and **Stop**.
+   **Stop** terminates this panel's agent process group. The toolbar's restore button
+   recovers the last input after a failed send.
 4. Click a file reference to open the file and select its lines. Permissions and
    agent questions require an explicit response.
+
+During a turn, **Working...** appears below the conversation. On completion or stop,
+it becomes the elapsed time and the time spent waiting, reasoning, running tools,
+streaming the reply, and awaiting user input. These are client-observed wall times,
+not server measurements. Concurrent tools count once, and unreported reasoning
+stays in waiting time.
 
 | Action | Shortcut |
 |---|---|
@@ -131,7 +145,8 @@ available local session. Choosing New Chat prevents that automatic selection unt
 another conversation is started or resumed.
 
 Restoration loads the panel's recent transcript and parameters first. The agent's
-conversation process starts when the next message is sent. Native sessions are discovered read-only;
+selected CLI connects in the background to read its session configuration, without
+sending a prompt. Native sessions are discovered read-only;
 older versions or custom storage layouts may expose fewer sessions. Imported
 transcripts are available for Pi, Codex, Claude, and Hermes ACP sessions; other
 native imports start with an empty display while the CLI retains its context.
@@ -146,7 +161,10 @@ and effort names, Pi accepts `provider/model` and thinking levels, and Kimi's
 thinking values depend on the selected model. ZCode accepts an existing
 `provider-id/model-id`; DeepSeek Harness accepts a model ID or `provider/model`.
 An unavailable model or unsupported effort produces an error rather than being
-silently ignored. Switching CLI tools clears the parameter fields.
+silently ignored. Switching CLI tools reloads the fields from that CLI. Unknown or
+unsupported settings remain empty. Claude's model can be read through its context
+usage endpoint (or its first-turn initialization on older versions); its default
+reasoning effort is not reported by the current control protocol.
 
 ## Supported Agents
 
@@ -165,7 +183,7 @@ supported. No answer is preselected or submitted automatically. Failed replies
 remain editable. Permissions are forwarded to the CLI only after a response.
 
 DeepSeek Harness requires `profiles/acp/cordis.yml` under `DSH_HOME` or `~/.dsh`,
-and Node.js 22.15+ or 24+. Its ACP frontend omits human questions, so a temporary
+and Node.js 24.9+ for the tested DSH version. Its ACP frontend omits human questions, so a temporary
 module loads the installed native question tool and connects it to the panel.
 No installed package or profile is edited. ACP resume depends on the agent's
 advertised capabilities; client filesystem and terminal capabilities remain disabled.

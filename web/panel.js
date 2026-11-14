@@ -11,6 +11,56 @@ let sequence = 0;
 let turn = 0;
 let processGroup;
 let followTail = true;
+let activity;
+let activityTimer;
+const summaries = new Map();
+
+function keepActivityLast() {
+  if (activity) conversation.append(activity);
+}
+
+function working(busy) {
+  if (!busy) {
+    clearInterval(activityTimer); activityTimer = undefined;
+    activity?.remove(); activity = undefined;
+    return;
+  }
+  if (activity) return;
+  activity = document.createElement("div"); activity.className = "activity";
+  activity.setAttribute("role", "status"); activity.setAttribute("aria-label", "Working");
+  const label = document.createElement("span"); label.textContent = "Working";
+  const dots = document.createElement("span"); dots.className = "activity-dots";
+  dots.setAttribute("aria-hidden", "true"); dots.textContent = ".";
+  activity.append(label, dots); keepActivityLast(); empty.hidden = true;
+  let count = 1;
+  activityTimer = setInterval(() => { count = count % 3 + 1; dots.textContent = ".".repeat(count); }, 450);
+  if (followTail) window.scrollTo(0, document.documentElement.scrollHeight);
+}
+
+function turnSummary(event) {
+  working(false);
+  const elapsed = Number(event.elapsed);
+  if (!Number.isFinite(elapsed) || elapsed < 0) return;
+  let node = summaries.get(event.id);
+  if (!node) {
+    node = document.createElement("div"); node.className = "turn-summary";
+    node.title = "Client-observed wall time. Overlapping tools are counted once; these are not server profiling measurements.";
+    summaries.set(event.id, node); conversation.append(node);
+    if (summaries.size > 200) { const oldest = summaries.keys().next().value; summaries.get(oldest).remove(); summaries.delete(oldest); }
+  }
+  const duration = seconds => seconds < .001 ? "<1 ms" : seconds < 1 ? `${Math.round(seconds * 1000)} ms`
+    : seconds < 60 ? `${seconds.toFixed(1)} s` : `${Math.floor(seconds / 60)}m ${(seconds % 60).toFixed(1)}s`;
+  const labels = {waiting: "Waiting", reasoning: "Reasoning", tools: "Tools", response: "Reply", user: "Awaiting input"};
+  const outcome = {stopped: "Stopped", failed: "Failed", completed: "Completed"}[event.outcome] || "Completed";
+  const parts = [`${outcome} in ${duration(elapsed)}`];
+  for (const [key, label] of Object.entries(labels)) {
+    const seconds = Number(event.durations?.[key] || 0);
+    if (Number.isFinite(seconds) && seconds > 0 && elapsed > 0)
+      parts.push(`${label} ${duration(seconds)} (${seconds / elapsed < .005 ? "<1" : Math.round(seconds / elapsed * 100)}%)`);
+  }
+  node.textContent = parts.join(" · "); empty.hidden = true;
+  if (followTail) window.scrollTo(0, document.documentElement.scrollHeight);
+}
 
 window.addEventListener("scroll", () => {
   followTail = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 32;
@@ -25,6 +75,7 @@ function processing() {
     // Opening process details should leave the clicked row in place while reading.
     label.addEventListener("click", () => { followTail = false; });
     processGroup = {node, body};
+    keepActivityLast();
   }
   return processGroup;
 }
@@ -87,6 +138,7 @@ function message(event) {
   entry.text = ((event.append ? entry.text : "") + (event.text || "")).slice(-2 * 1024 * 1024);
   if (event.status) entry.label.textContent = `${event.title || "Tool"} · ${event.status}`;
   renderSoon(entry);
+  keepActivityLast();
 }
 
 function answer(id, value, node) {
@@ -182,14 +234,18 @@ function request(event) {
     cancel.onclick = () => answer(event.id, {_cancel: true}, node); node.append(cancel);
   }
   requests.set(event.id, node); conversation.append(node); empty.hidden = true;
+  keepActivityLast();
   if (followTail) node.scrollIntoView({block: "nearest"});
 }
 
 function receive(event) {
   if (event.type === "clear") {
+    working(false); summaries.clear();
     conversation.replaceChildren(); entries.clear(); requests.clear(); dirty.clear(); empty.hidden = false;
     processGroup = null; turn = 0; followTail = true; window.scrollTo(0, 0);
-  } else if (event.type === "message" || event.type === "tool") message(event);
+  } else if (event.type === "status") working(Boolean(event.busy));
+  else if (event.type === "turn_summary") turnSummary(event);
+  else if (event.type === "message" || event.type === "tool") message(event);
   else if (event.type === "error") message({...event, role: "error", title: "Error", id: `error-${++sequence}`});
   else if (event.type === "request") request(event);
   else if (event.type === "request_resolved") {

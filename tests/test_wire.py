@@ -68,6 +68,18 @@ class WireTests(unittest.IsolatedAsyncioTestCase):
         await self.until(lambda e: e['type'] == 'status' and not e['busy'])
         self.assertTrue(any(e.get('text') == 'fragmented \u4e2d\u6587' for e in self.events))
 
+    async def test_buffered_reset_prepare_and_send_preserve_the_new_configuration(self):
+        base = dict(agent='pi', cwd=self.temp.name)
+        await self.write(dict(type='prepare', requestId='old', **base))
+        await self.until(lambda e: e['type'] == 'configuration_complete' and e['requestId'] == 'old')
+        commands = [dict(type='reset', cwd=self.temp.name), dict(type='prepare', requestId='new', **base),
+                    dict(type='send', text='after buffered reset', **base)]
+        await self.write((''.join(json.dumps(c) + '\n' for c in commands)).encode())
+        await self.until(lambda e: e['type'] == 'turn_summary')
+        self.assertTrue(any(e['type'] == 'configuration' and e.get('requestId') == 'new' and e['model'] == 'fake-model' for e in self.events))
+        self.assertTrue(any(e.get('text') == 'after buffered reset' for e in self.events))
+        self.assertFalse(any(e['type'] == 'error' for e in self.events))
+
     async def test_busy_cancel_and_next_send(self):
         await self.send('hang')
         await self.until(lambda e: e.get('text', '').startswith('child_pid='))

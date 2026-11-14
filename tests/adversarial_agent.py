@@ -12,20 +12,31 @@ mode = sys.argv[1]
 def emit(data):
     print(json.dumps(data, ensure_ascii=False), flush=True)
 
+def wait_for_prompt():
+    for line in sys.stdin:
+        request = json.loads(line)
+        if request.get('type') == 'get_state':
+            emit({'type':'response', 'command':'get_state', 'id':request['id'], 'success':True, 'data':{}})
+        elif request.get('type') == 'prompt':
+            return
+
 if mode == 'oversize':
     print('x' * 4096, flush=True)
     time.sleep(300)
 elif mode == 'stderr':
+    wait_for_prompt()
     for byte in 'UTF-8: \u4e2d\u6587\n'.encode():
         os.write(2, bytes([byte])); time.sleep(.005)
     emit({'type': 'agent_settled'})
     sys.stdin.read()
 elif mode == 'noise':
+    wait_for_prompt()
     for record in [b'plain log\n', b'\xff\n', b'[]\n', b'null\n', b'{broken\n']:
         os.write(1, record)
     emit({'type': 'agent_settled'})
     sys.stdin.read()
 elif mode == 'stubborn':
+    wait_for_prompt()
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     child = subprocess.Popen([sys.executable, '-c', 'import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(300)'])
     emit({'type': 'extension_ui_request', 'method': 'notify', 'message': f'child_pid={child.pid}'})

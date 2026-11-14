@@ -87,6 +87,52 @@ def dsh_profile_ready(env):
     return (Path(env.get("DSH_HOME", str(Path.home() / ".dsh"))).expanduser() / "profiles/acp/cordis.yml").is_file()
 
 
+class TurnTiming:
+    """Non-overlapping wall time inferred from received events, not server profiling."""
+    def __init__(self, clock=time.monotonic):
+        self.clock = clock
+        self.started = self.changed = clock()
+        self.id = uuid.uuid4().hex
+        self.phase = "waiting"
+        self.durations = dict.fromkeys(("waiting", "reasoning", "tools", "response", "user"), 0.0)
+        self.tools = set()
+        self.requests = set()
+        self.failed = False
+
+    def advance(self, phase):
+        now = self.clock()
+        self.durations[self.phase] += max(0, now - self.changed)
+        self.changed, self.phase = now, phase
+
+    def observe(self, kind, fields):
+        phase = self.phase
+        if kind == "tool":
+            if fields.get("status") in ("done", "completed", "failed", "cancelled", "error"):
+                self.tools.discard(fields.get("id"))
+                phase = "waiting"
+            else:
+                self.tools.add(fields.get("id"))
+                phase = "tools"
+        elif kind == "request":
+            self.requests.add(fields.get("id"))
+        elif kind == "request_resolved":
+            self.requests.discard(fields.get("id"))
+            phase = "waiting"
+        elif kind == "requests_cleared":
+            self.requests.clear()
+            phase = "waiting"
+        elif kind == "message" and fields.get("role") in ("assistant", "reasoning"):
+            phase = "reasoning" if fields["role"] == "reasoning" else "response"
+        elif kind == "error":
+            self.failed = True
+        self.advance("user" if self.requests else "tools" if self.tools else phase)
+
+    def finish(self, stopped=False):
+        self.advance(self.phase)
+        return dict(id=self.id, elapsed=sum(self.durations.values()), durations=dict(self.durations),
+                    outcome="stopped" if stopped else "failed" if self.failed else "completed")
+
+
 def text_content(content):
     if isinstance(content, str):
         return content
@@ -157,8 +203,39 @@ class Adapter:
         self.message_prefix = uuid.uuid4().hex
         self.model = ""
         self.effort = ""
+        self.configuration_id = ""
+        self.timing = None
+        self.restore_native_settings = False
+        self.connected = False
+
+    def starting_parameters(self):
+        return ("", "") if self.restore_native_settings else (self.model, self.effort)
+
+    async def connect(self):
+        raise NotImplementedError("This agent cannot inspect its session configuration")
+
+    async def configure(self, model, effort):
+        """Restart transports without live setters, retaining the native session ID."""
+        previous = self.model, self.effort
+        if previous == (model, effort):
+            await self.connect()
+            return
+        await self.close()
+        self.model, self.effort = model, effort
+        try:
+            await self.connect()
+        except BaseException:
+            await self.close()
+            self.model, self.effort = previous
+            raise
+
+    def configuration_ready(self):
+        self.emit("configuration", agent=self.agent, session=self.session, cwd=self.cwd,
+                  model=self.model, effort=self.effort, requestId=self.configuration_id)
 
     def emit(self, kind, **fields):
+        if self.timing:
+            self.timing.observe(kind, fields)
         if hasattr(self.bridge, "record"):
             self.bridge.record(self, dict(type=kind, **fields))
         self.bridge.emit(dict(type=kind, **fields))
@@ -168,6 +245,12 @@ class Adapter:
             self.emit("message", id=f"{self.message_prefix}:{id}", text=text, role=role, append=append)
 
     def status(self, busy, text=""):
+        if busy and not self.timing:
+            self.timing = TurnTiming()
+        elif not busy and self.timing:
+            summary = self.timing.finish(stopped=text == "Stopped")
+            self.timing = None
+            self.emit("turn_summary", **summary)
         self.busy = busy
         self.emit("status", busy=busy, text=text or ("Working" if busy else "Ready"))
 
@@ -272,6 +355,7 @@ class Adapter:
         self.status(False, "Stopped")
 
     async def close(self):
+        self.connected = False
         self.closing = True
         self.requests.clear()
         if self.process and self.process.returncode is None:
@@ -298,21 +382,64 @@ class Adapter:
         self.waiters.clear()
 
     def session_ready(self):
+        self.connected = True
+        self.restore_native_settings = False
         self.emit("session", agent=self.agent, session=self.session, cwd=self.cwd, model=self.model, effort=self.effort)
+        self.configuration_ready()
 
 
 class PiAdapter(Adapter):
-    async def send(self, text):
+    async def pi_rpc(self, kind, **params):
+        key = uuid.uuid4().hex
+        future = asyncio.get_running_loop().create_future()
+        self.waiters[key] = future
+        try:
+            await self.write(dict(type=kind, id=key, **params))
+            return await asyncio.wait_for(future, 30)
+        finally:
+            self.waiters.pop(key, None)
+
+    def read_state(self, state):
+        self.session = state.get("sessionFile") or self.session
+        model = state.get("model")
+        if isinstance(model, dict):
+            self.model = "/".join(str(model[k]) for k in ("provider", "id") if model.get(k))
+        if "thinkingLevel" in state:
+            self.effort = state["thinkingLevel"] or ""
+        self.session_ready()
+
+    async def connect(self):
         if not self.process or self.process.returncode is not None:
+            model, effort = self.starting_parameters()
             args = ["--mode", "rpc"]
             if self.session:
                 args += ["--session", self.session]
-            if self.model:
-                args += ["--model", self.model]
-            if self.effort:
-                args += ["--thinking", self.effort]
+            if model:
+                args += ["--model", model]
+            if effort:
+                args += ["--thinking", effort]
             await self.launch(args)
-            await self.write({"type": "get_state", "id": "state"})
+            self.read_state(await self.pi_rpc("get_state"))
+
+    async def configure(self, model, effort):
+        await self.connect()
+        if not model or not effort:
+            await super().configure(model, effort)
+            return
+        try:
+            if model != self.model:
+                available = (await self.pi_rpc("get_available_models")).get("models", [])
+                choices = [m for m in available if model in (m.get("id"), f"{m.get('provider')}/{m.get('id')}")]
+                if len(choices) != 1:
+                    raise ValueError("Pi model is unavailable or ambiguous; enter provider/model-id")
+                await self.pi_rpc("set_model", provider=choices[0]["provider"], modelId=choices[0]["id"])
+            if effort != self.effort:
+                await self.pi_rpc("set_thinking_level", level=effort)
+        finally:
+            self.read_state(await self.pi_rpc("get_state"))
+
+    async def send(self, text):
+        await self.connect()
         self.turn = uuid.uuid4().hex
         self.message_index = 0
         await self.write({"type": "prompt", "id": self.turn, "message": text})
@@ -337,12 +464,18 @@ class PiAdapter(Adapter):
         elif kind == "agent_settled":
             self.status(False)
         elif kind == "response":
+            future = self.waiters.get(data.get("id"))
+            if future and not future.done():
+                if data.get("success", True):
+                    future.set_result(data.get("data", {}))
+                else:
+                    future.set_exception(RuntimeError(data.get("error", "Pi command failed")))
+                return
             if not data.get("success", True):
                 self.emit("error", text=data.get("error", "Pi command failed"))
                 self.status(False)
             if data.get("command") == "get_state":
-                self.session = data.get("data", {}).get("sessionFile", "")
-                self.session_ready()
+                self.read_state(data.get("data", {}))
             if data.get("command") == "prompt" and data.get("data", {}).get("disposition") == "handled":
                 self.status(False)
         elif kind == "extension_ui_request":
@@ -449,35 +582,78 @@ class ACPAdapter(Adapter):
                 result = await self.rpc("session/new", {"cwd": self.cwd, "mcpServers": []})
                 self.session = result["sessionId"]
                 self.tools.clear()
-            self.options = result.get("configOptions", [])
-            for category, value in (("model", self.model), ("thought_level", self.effort)):
-                if not value:
+            model, effort = self.starting_parameters()
+            self.read_configuration(result)
+            await self.apply_configuration(model, effort)
+            self.session_ready()
+
+    def read_configuration(self, result):
+        self.options = result.get("configOptions", self.options)
+        if "configOptions" in result and self.config_option("thought_level") is None:
+            self.effort = ""
+        for field, category in (("model", "model"), ("effort", "thought_level")):
+            option = self.config_option(category)
+            if option and "currentValue" in option:
+                value = str(option["currentValue"] or "")
+                if field == "model" and self.agent == "deepseek":
+                    try:
+                        pair = json.loads(value)
+                        if isinstance(pair, list) and len(pair) == 2 and all(isinstance(p, str) for p in pair):
+                            value = "/".join(pair)
+                    except ValueError:
+                        pass
+                setattr(self, field, value)
+        legacy = result.get("models", {})
+        if legacy.get("currentModelId"):
+            self.model = legacy["currentModelId"]
+        self.configuration_ready()
+
+    def config_option(self, category):
+        names = ("model",) if category == "model" else ("reasoning_effort", "thinking", "thought_level", "reasoning")
+        return next((o for o in self.options if o.get("id") in names or o.get("category") == category), None)
+
+    async def apply_configuration(self, model, effort):
+        for category, value in (("model", model), ("thought_level", effort)):
+            if not value:
+                continue
+            option = self.config_option(category)
+            field = "model" if category == "model" else "effort"
+            if option is None:
+                if category == "model":
+                    if value != self.model:
+                        result = await self.rpc("session/set_model", {"sessionId": self.session, "modelId": value})
+                        self.model = value
+                        self.read_configuration(result)
                     continue
-                names = ("model",) if category == "model" else ("reasoning_effort", "thinking", "thought_level", "reasoning")
-                option = next((o for o in self.options if o.get("id") in names or o.get("category") == category), None)
-                if option is None:
-                    if category == "model":
-                        await self.rpc("session/set_model", {"sessionId": self.session, "modelId": value})
-                        continue
-                    raise RuntimeError("This agent does not expose a reasoning effort option; leave the field empty to use its default")
-                choices = []
-                for entry in option.get("options", []):
-                    choices.extend(entry.get("options", [entry]))
-                def matches_model(choice):
-                    raw = str(choice.get("value", ""))
-                    if value in (raw, choice.get("name")) or raw.endswith("/" + value):
-                        return True
-                    if self.agent == "deepseek" and category == "model":
-                        try:
-                            pair = json.loads(raw)
-                            return isinstance(pair, list) and len(pair) == 2 and value in (pair[1], "/".join(pair))
-                        except (ValueError, TypeError):
-                            pass
-                    return False
-                matches = [c["value"] for c in choices if matches_model(c)]
-                result = await self.rpc("session/set_config_option", {"sessionId": self.session, "configId": option["id"],
-                    "value": matches[0] if len(matches) == 1 else value})
-                self.options = result.get("configOptions", self.options)
+                raise RuntimeError("This agent does not expose a reasoning effort option; leave the field empty to use its default")
+            choices = []
+            for entry in option.get("options", []):
+                choices.extend(entry.get("options", [entry]))
+            def matches_model(choice):
+                raw = str(choice.get("value", ""))
+                if value in (raw, choice.get("name")) or raw.endswith("/" + value):
+                    return True
+                if self.agent == "deepseek" and category == "model":
+                    try:
+                        pair = json.loads(raw)
+                        return isinstance(pair, list) and len(pair) == 2 and value in (pair[1], "/".join(pair))
+                    except (ValueError, TypeError):
+                        pass
+                return False
+            matches = [c["value"] for c in choices if matches_model(c)]
+            selected = matches[0] if len(matches) == 1 else value
+            if selected == option.get("currentValue"):
+                continue
+            result = await self.rpc("session/set_config_option", {"sessionId": self.session, "configId": option["id"], "value": selected})
+            setattr(self, field, value)
+            self.read_configuration(result)
+
+    async def configure(self, model, effort):
+        await self.connect()
+        # Empty fields retain the agent's effective default; ACP has no universal reset operation.
+        try:
+            await self.apply_configuration(model, effort)
+        finally:
             self.session_ready()
 
     async def send(self, text):
@@ -523,7 +699,7 @@ class ACPAdapter(Adapter):
                 if len(self.tools) > 1000:
                     self.tools.pop(next(iter(self.tools)))
             elif kind == "config_option_update":
-                self.options = update.get("configOptions", self.options)
+                self.read_configuration(update)
             elif kind == "plan":
                 self.message("plan", json.dumps(update.get("entries", []), ensure_ascii=False), "reasoning")
             elif kind not in ("current_mode_update", "available_commands_update", "usage_update"):
@@ -568,20 +744,37 @@ class ACPAdapter(Adapter):
 
 
 class CodexAdapter(Adapter):
-    async def send(self, text):
+    async def configure(self, model, effort):
+        # Codex does not persist an empty thread until its first turn. Recreate
+        # only that empty thread when applying startup-only configuration.
+        if getattr(self, "empty_thread", False) and (model, effort) != (self.model, self.effort):
+            self.session = ""
+        await super().configure(model, effort)
+
+    async def connect(self):
         if not self.process or self.process.returncode is not None:
+            model, effort = self.starting_parameters()
             await self.launch(["app-server"])
             await self.rpc("initialize", {"clientInfo": {"name": "kate_agent_panel", "title": "Kate Agent Panel", "version": "0.1.0"}, "capabilities": {"experimentalApi": True}})
             await self.write({"method": "initialized"})
             if self.session:
-                result = await self.rpc("thread/resume", {"threadId": self.session, "cwd": self.cwd, "excludeTurns": True, **({"model": self.model} if self.model else {})})
+                result = await self.rpc("thread/resume", {"threadId": self.session, "cwd": self.cwd, "excludeTurns": True, **({"model": model} if model else {}),
+                    **({"config": {"model_reasoning_effort": effort}} if effort else {})})
             else:
-                result = await self.rpc("thread/start", {"cwd": self.cwd, **({"model": self.model} if self.model else {})})
+                result = await self.rpc("thread/start", {"cwd": self.cwd, **({"model": model} if model else {}),
+                    **({"config": {"model_reasoning_effort": effort}} if effort else {})})
+                self.empty_thread = True
             self.session = result["thread"]["id"]
+            self.model = result.get("model") or self.model
+            if "reasoningEffort" in result:
+                self.effort = result["reasoningEffort"] or ""
             self.session_ready()
+    async def send(self, text):
+        await self.connect()
         result = await self.rpc("turn/start", {"threadId": self.session, "input": [{"type": "text", "text": text}],
             **({"model": self.model} if self.model else {}), **({"effort": self.effort} if self.effort else {})})
         self.turn = result["turn"]["id"]
+        self.empty_thread = False
 
     async def handle(self, data):
         method, p = data.get("method", ""), data.get("params", {})
@@ -646,33 +839,53 @@ class CodexAdapter(Adapter):
 
 
 class ClaudeAdapter(Adapter):
-    async def send(self, text):
-        self.turn = uuid.uuid4().hex
-        self.message_id = self.turn
+    async def control(self, request, timeout=60):
+        key = uuid.uuid4().hex
+        future = asyncio.get_running_loop().create_future()
+        self.waiters[key] = future
+        try:
+            await self.write({"type": "control_request", "request_id": key, "request": request})
+            return await asyncio.wait_for(future, timeout)
+        finally:
+            self.waiters.pop(key, None)
+
+    async def connect(self):
         if not self.process or self.process.returncode is not None:
+            model, effort = self.starting_parameters()
             args = ["--print", "--verbose", "--output-format", "stream-json", "--include-partial-messages",
                     "--input-format", "stream-json", "--permission-prompt-tool", "stdio"]
             if self.session:
                 args += ["--resume", self.session]
-            if self.model:
-                args += ["--model", self.model]
-            if self.effort:
-                args += ["--effort", self.effort]
+            if model:
+                args += ["--model", model]
+            if effort:
+                args += ["--effort", effort]
             await self.launch(args)
-            key = uuid.uuid4().hex
-            future = asyncio.get_running_loop().create_future()
-            self.waiters[key] = future
+            result = await self.control({"subtype": "initialize", "hooks": None})
+            self.model = result.get("model") or self.model
+            self.effort = result.get("effort") or self.effort
             try:
-                await self.write({"type": "control_request", "request_id": key,
-                                  "request": {"subtype": "initialize", "hooks": None}})
-                await asyncio.wait_for(future, 60)
-            finally:
-                self.waiters.pop(key, None)
+                # Supported by current Claude Agent SDK; older CLIs may reject it.
+                result = await self.control({"subtype": "get_context_usage"}, timeout=5)
+                self.model = result.get("model") or self.model
+            except (RuntimeError, asyncio.TimeoutError):
+                pass
+            self.restore_native_settings = False
+            self.connected = True
+            self.configuration_ready()
+    async def send(self, text):
+        self.turn = uuid.uuid4().hex
+        self.message_id = self.turn
+        await self.connect()
         await self.write({"type": "user", "message": {"role": "user", "content": text},
                           "parent_tool_use_id": None, "session_id": self.session})
 
     async def handle(self, data):
         kind = data.get("type")
+        if kind == "system" and data.get("subtype") == "init":
+            self.model = data.get("model") or self.model
+            self.effort = data.get("effort") or self.effort
+            self.configuration_ready()
         if data.get("session_id"):
             if self.session != data["session_id"]:
                 self.session = data["session_id"]
@@ -748,8 +961,49 @@ class ClaudeAdapter(Adapter):
 
 
 class ZCodeAdapter(Adapter):
-    async def send(self, text):
-        self.turn = uuid.uuid4().hex
+    def read_configuration(self, result):
+        settings = result.get("settings", {})
+        if settings:
+            previous = getattr(self, "settings", {})
+            merged = {**previous, **settings}
+            if "model" in settings:
+                merged["model"] = {**previous.get("model", {}), **settings["model"]}
+                choices = {json.dumps(o.get("ref", {}), sort_keys=True): o
+                           for o in previous.get("model", {}).get("available", []) + settings["model"].get("available", [])}
+                merged["model"]["available"] = list(choices.values())
+            self.settings = merged
+        current = settings.get("model", {}).get("current", {})
+        if current.get("modelId"):
+            self.model = "/".join(str(current[k]) for k in ("providerId", "modelId") if current.get(k))
+        effort = settings.get("thoughtLevel", {}).get("current", current.get("options", {}).get("reasoningLevel"))
+        if effort is not None:
+            self.effort = str(effort)
+        elif settings.get("thoughtLevel", {}).get("enabled") is False:
+            self.effort = ""
+        self.configuration_ready()
+
+    async def apply_configuration(self, model, effort):
+        settings = getattr(self, "settings", {})
+        if model and model != self.model:
+            available = [o for o in settings.get("model", {}).get("available", []) if o.get("ref")]
+            choices = [o for o in available if model in (o["ref"]["modelId"], o["ref"]["providerId"] + "/" + o["ref"]["modelId"])]
+            if len(choices) != 1:
+                raise ValueError("ZCode model is unavailable or ambiguous; enter an existing provider-id/model-id")
+            selection = dict(choices[0]["ref"])
+            current = settings.get("model", {}).get("current", {})
+            same_model = all(current.get(k) == selection[k] for k in ("providerId", "modelId"))
+            selected_effort = effort or (current.get("options", {}).get("reasoningLevel") if same_model else "") or choices[0].get("reasoning", {}).get("defaultLevel")
+            if selected_effort:
+                selection["options"] = {"reasoningLevel": selected_effort}
+            result = await self.rpc("session/setModel", {"sessionId": self.session, "model": selection, "persistAsWorkspaceLastUsed": False})
+            self.model, self.effort = model, selected_effort or ""
+            self.read_configuration(result)
+        elif effort and effort != self.effort:
+            result = await self.rpc("session/setThoughtLevel", {"sessionId": self.session, "thoughtLevel": effort, "persistAsWorkspaceLastUsed": False})
+            self.effort = effort
+            self.read_configuration(result)
+
+    async def connect(self):
         if not self.process or self.process.returncode is not None:
             await self.launch(["app-server", "--cwd", self.cwd])
             workspace = {"workspacePath": self.cwd, "workspaceKey": self.cwd}
@@ -758,24 +1012,24 @@ class ZCodeAdapter(Adapter):
             else:
                 result = await self.rpc("session/create", {"workspace": workspace, "mode": "build"})
             self.session = result["session"]["sessionId"]
-            settings = result.get("settings", {})
-            if self.model:
-                available = [o for o in settings.get("model", {}).get("available", []) if o.get("ref")]
-                choices = [o for o in available if self.model in (o["ref"]["modelId"], o["ref"]["providerId"] + "/" + o["ref"]["modelId"])]
-                if len(choices) != 1:
-                    raise ValueError("ZCode model is unavailable or ambiguous; enter an existing provider-id/model-id")
-                model = dict(choices[0]["ref"])
-                current = settings.get("model", {}).get("current", {})
-                same_model = all(current.get(k) == model[k] for k in ("providerId", "modelId"))
-                effort = self.effort or (current.get("options", {}).get("reasoningLevel") if same_model else "") or choices[0].get("reasoning", {}).get("defaultLevel")
-                if effort:
-                    model["options"] = {"reasoningLevel": effort}
-                await self.rpc("session/setModel", {"sessionId": self.session, "model": model, "persistAsWorkspaceLastUsed": False})
-            elif self.effort:
-                await self.rpc("session/setThoughtLevel", {"sessionId": self.session, "thoughtLevel": self.effort, "persistAsWorkspaceLastUsed": False})
+            model, effort = self.starting_parameters()
+            self.model = self.effort = ""
+            self.read_configuration(result)
+            await self.apply_configuration(model, effort)
             await self.rpc("session/subscribe", {"sessionId": self.session, "deliveryKind": "desktop-continuous",
                 "afterSeq": result.get("runtime", {}).get("eventSeq", 0), "includeSnapshot": False})
             self.session_ready()
+
+    async def configure(self, model, effort):
+        await self.connect()
+        try:
+            await self.apply_configuration(model, effort)
+        finally:
+            self.session_ready()
+
+    async def send(self, text):
+        await self.connect()
+        self.turn = uuid.uuid4().hex
         await self.rpc("session/send", {"sessionId": self.session, "content": text})
 
     async def handle(self, data):
@@ -800,6 +1054,10 @@ class ZCodeAdapter(Adapter):
             data = params
             if self.session and data.get("sessionId", self.session) != self.session:
                 return
+        elif method == "state.updated":
+            if params.get("sessionId", self.session) == self.session and isinstance(params.get("patch"), dict):
+                self.read_configuration({"settings": params["patch"]})
+            return
         elif method:
             if method == "startup/storageState" and params.get("phase") == "failed":
                 self.emit("error", text=json.dumps(params.get("error", params), ensure_ascii=False))
@@ -810,7 +1068,9 @@ class ZCodeAdapter(Adapter):
             self.session = data["sessionId"]
         kind = data.get("type")
         payload = data.get("payload", {})
-        if kind == "model.streaming" and payload.get("kind") in ("text_delta", "reasoning_delta"):
+        if kind == "state.updated":
+            self.read_configuration(payload)
+        elif kind == "model.streaming" and payload.get("kind") in ("text_delta", "reasoning_delta"):
             role = "reasoning" if payload["kind"] == "reasoning_delta" else "assistant"
             self.message(self.turn if role == "assistant" else self.turn + ":reasoning", payload.get("delta", ""), role, True)
         elif kind == "tool.updated":
@@ -863,11 +1123,12 @@ class Bridge:
         self.session_lock = asyncio.Lock()
         self.sessions_request = ""
         self.session_epoch = 0
+        self.configuration_task = None
 
     def record(self, adapter, event):
         if adapter is not self.adapter or not self.store:
             return
-        if event["type"] in ("message", "tool", "error"):
+        if event["type"] in ("message", "tool", "error", "turn_summary"):
             key = (event["type"], event.get("role", ""), event.get("id", uuid.uuid4().hex))
             previous = self.history.get(key, {})
             merged = dict(event)
@@ -886,7 +1147,7 @@ class Bridge:
         if self.flush_handle:
             self.flush_handle.cancel(); self.flush_handle = None
         adapter = self.adapter
-        if self.store and adapter and adapter.session:
+        if self.store and adapter and adapter.session and (self.history or self.session_title):
             try:
                 self.session_key = self.store.save(dict(agent=adapter.agent, session=adapter.session, cwd=adapter.cwd,
                     model=adapter.model, effort=adapter.effort, title=self.session_title, updated=time.time()),
@@ -991,6 +1252,7 @@ class Bridge:
             return
         self.adapter = ADAPTERS[item["agent"]](self, item["agent"], item["cwd"])
         self.adapter.session, self.adapter.model, self.adapter.effort = item["session"], item["model"], item["effort"]
+        self.adapter.restore_native_settings = True
         self.session_key, self.session_title = item["id"], item["title"]
         self.history = {(e["type"], e.get("role", ""), e.get("id", str(i))): e for i, e in enumerate(history)}
         self.store.save(item, select=True)
@@ -1022,17 +1284,51 @@ class Bridge:
             self.history.clear(); self.session_title = ""; self.session_key = ""
         if self.adapter is None:
             self.adapter = ADAPTERS[agent](self, agent, cwd)
-        model, effort = command.get("model", ""), command.get("effort", "")
+        model, effort = command.get("model", self.adapter.model), command.get("effort", self.adapter.effort)
         if not isinstance(model, str) or not isinstance(effort, str) or len(model) > 512 or len(effort) > 128:
             raise ValueError("Invalid model or reasoning effort")
         if (model, effort) != (self.adapter.model, self.adapter.effort):
-            await self.adapter.close()
-            self.adapter.model, self.adapter.effort = model.strip(), effort.strip()
+            if self.adapter.process and self.adapter.process.returncode is None:
+                await self.adapter.configure(model.strip(), effort.strip())
+            else:
+                self.adapter.model, self.adapter.effort = model.strip(), effort.strip()
         if not self.session_title:
             self.session_title = command.get("displayText", text).strip()[:160] or "Editor context"
         self.record(self.adapter, dict(type="message", role="user", id=uuid.uuid4().hex, text=command.get("displayText", text), attachments=command.get("attachments", [])))
         self.adapter.status(True)
         await self.adapter.send(text)
+
+    async def configuration(self, command):
+        async with self.session_lock:
+            agent, directory = command.get("agent"), command.get("cwd")
+            if not isinstance(agent, str) or agent not in ADAPTERS:
+                raise ValueError("Agent protocol is not supported yet")
+            if not isinstance(directory, str) or not directory or not Path(directory).expanduser().is_dir():
+                raise ValueError("Choose an existing working directory")
+            cwd = canonical(directory)
+            if self.adapter and self.adapter.busy:
+                raise ValueError("Stop the current turn before changing its configuration")
+            model, effort = command.get("model", ""), command.get("effort", "")
+            if not isinstance(model, str) or not isinstance(effort, str) or len(model) > 512 or len(effort) > 128:
+                raise ValueError("Invalid model or reasoning effort")
+            self.session_epoch += 1
+            if self.adapter and (self.adapter.agent != agent or self.adapter.cwd != cwd):
+                self.flush()
+                await self.adapter.close()
+                self.adapter = None
+                self.history.clear(); self.session_title = ""; self.session_key = ""
+            if self.adapter is None:
+                self.adapter = ADAPTERS[agent](self, agent, cwd)
+            adapter = self.adapter
+            adapter.configuration_id = command.get("requestId", "")
+            try:
+                if command.get("type") == "configure":
+                    await adapter.configure(model.strip(), effort.strip())
+                else:
+                    await adapter.connect()
+            finally:
+                adapter.configuration_ready()
+                self.flush()
 
     async def dispatch(self, command):
         try:
@@ -1040,15 +1336,22 @@ class Bridge:
             if kind == "discover":
                 self.emit(inventory())
             elif kind == "send":
+                if self.configuration_task and not self.configuration_task.done():
+                    await asyncio.shield(self.configuration_task)
                 await self.send(command)
             elif kind == "sessions":
                 await self.sessions(command)
+            elif kind in ("prepare", "configure"):
+                await self.configuration(command)
             elif kind == "resume":
                 async with self.session_lock:
                     await self.resume(command)
             elif kind in ("cancel", "reset"):
                 self.sessions_request = ""
                 self.session_epoch += 1
+                if self.configuration_task and not self.configuration_task.done():
+                    self.configuration_task.cancel()
+                    await asyncio.gather(self.configuration_task, return_exceptions=True)
                 had_adapter = self.adapter is not None
                 if self.send_task and not self.send_task.done():
                     self.send_task.cancel()
@@ -1059,6 +1362,8 @@ class Bridge:
                     if kind == "reset":
                         if self.store and command.get("forgetLast", True):
                             self.store.forget_last(self.adapter.cwd)
+                            if command.get("cwd"):
+                                self.store.forget_last(command["cwd"])
                         self.adapter = None
                         self.history.clear(); self.session_title = ""; self.session_key = ""
                 elif kind == "reset" and self.store and command.get("forgetLast") and command.get("cwd"):
@@ -1068,19 +1373,27 @@ class Bridge:
                     self.emit({"type": "status", "busy": False, "text": "Ready"})
             elif kind == "reply" and self.adapter:
                 await self.adapter.reply(command["id"], command.get("value", ""))
-                self.emit({"type": "request_resolved", "id": command["id"]})
+                self.adapter.emit("request_resolved", id=command["id"])
             else:
                 raise ValueError("Unknown bridge command")
         except (ValueError, KeyError, TypeError, AttributeError, OSError, RuntimeError, sqlite3.Error, asyncio.TimeoutError) as exc:
             self.emit({"type": "error", "text": str(exc) or "Agent initialization timed out", "requestId": command.get("requestId", ""), "operation": command.get("type", "")})
             if command.get("type") == "reply":
                 self.emit({"type": "request_failed", "id": command.get("id", ""), "text": str(exc)})
+            if self.adapter and (command.get("type") == "prepare"
+                    or command.get("type") == "configure" and not self.adapter.connected):
+                await self.adapter.close()
             if command.get("type") == "send":
                 if self.adapter:
+                    if self.adapter.timing:
+                        self.adapter.timing.failed = True
                     await self.adapter.close()
                     self.adapter.status(False)
                 else:
                     self.emit({"type": "status", "busy": False, "text": "Ready"})
+        finally:
+            if command.get("type") in ("prepare", "configure"):
+                self.emit(dict(type="configuration_complete", requestId=command.get("requestId", "")))
 
     async def run(self):
         reader = asyncio.StreamReader(limit=MAX_RECORD)
@@ -1097,12 +1410,24 @@ class Bridge:
                 except ValueError as exc:
                     self.emit({"type": "error", "text": str(exc)})
                     continue
+                # Finish teardown before admitting the next prepare/send. Otherwise a
+                # buffered reset can accidentally cancel the configuration task after it.
+                if data.get("type") in ("reset", "cancel"):
+                    await self.dispatch(data)
+                    continue
                 if data.get("type") == "send" and self.send_task and not self.send_task.done():
                     self.emit({"type": "error", "text": "A turn is already running"})
                     continue
+                if data.get("type") in ("prepare", "configure") and self.configuration_task and not self.configuration_task.done():
+                    self.configuration_task.cancel()
+                    await asyncio.gather(self.configuration_task, return_exceptions=True)
+                    if self.adapter:
+                        await self.adapter.close()
                 task = asyncio.create_task(self.dispatch(data))
                 if data.get("type") == "send":
                     self.send_task = task
+                elif data.get("type") in ("prepare", "configure"):
+                    self.configuration_task = task
                 tasks.add(task)
                 task.add_done_callback(tasks.discard)
         finally:

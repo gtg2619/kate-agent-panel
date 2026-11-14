@@ -61,7 +61,7 @@ for raw in sys.stdin:
             response(pending, {'stopReason': 'end_turn'})
     elif mode == 'claude':
         if data.get('type') == 'control_request':
-            assert data['request']['subtype'] == 'initialize'
+            assert data['request']['subtype'] in ('initialize', 'get_context_usage')
             emit({'type': 'control_response', 'response': {'subtype': 'success', 'request_id': data['request_id'], 'response': {}}})
         elif data.get('type') == 'user':
             assert data['message']['role'] == 'user'

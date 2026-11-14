@@ -33,6 +33,7 @@
 #include <QShortcut>
 #include <QStandardItemModel>
 #include <QStandardPaths>
+#include <QStyle>
 #include <QTimer>
 #include <QTextBlock>
 #include <QTextDocument>
@@ -94,6 +95,7 @@ AgentPanel::AgentPanel(KTextEditor::MainWindow *window, QWidget *parent)
     m_agents->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     toolbar->addWidget(m_agents);
     m_workspace = new QLineEdit(inferWorkspace(), this);
+    m_workspace->setObjectName(QStringLiteral("agentWorkspace"));
     m_workspace->setAccessibleName(i18n("Working directory"));
     m_workspace->setToolTip(i18n("Working directory for this conversation"));
     toolbar->addWidget(m_workspace, 1);
@@ -101,14 +103,14 @@ AgentPanel::AgentPanel(KTextEditor::MainWindow *window, QWidget *parent)
     m_model->setObjectName(QStringLiteral("agentModelId"));
     m_model->setAccessibleName(i18n("Model ID"));
     m_model->setPlaceholderText(i18n("Model ID"));
-    m_model->setToolTip(i18n("Model ID for this session. Leave empty to use the CLI default."));
+    m_model->setToolTip(i18n("Effective CLI model. Changes apply to this session when you finish editing."));
     m_model->setMaximumWidth(190);
     toolbar->addWidget(m_model);
     m_effort = new QLineEdit(this);
     m_effort->setObjectName(QStringLiteral("agentReasoningEffort"));
     m_effort->setAccessibleName(i18n("Reasoning effort"));
     m_effort->setPlaceholderText(i18n("Reasoning effort"));
-    m_effort->setToolTip(i18n("Reasoning effort for this session. Leave empty to use the CLI default."));
+    m_effort->setToolTip(i18n("Effective CLI reasoning effort. Changes apply to this session when you finish editing."));
     m_effort->setMaximumWidth(140);
     toolbar->addWidget(m_effort);
     auto toolButton = [this](const QString &icon, const QString &label) {
@@ -130,7 +132,12 @@ AgentPanel::AgentPanel(KTextEditor::MainWindow *window, QWidget *parent)
     toolbar->addWidget(m_sessions);
     connect(m_sessions, &QToolButton::clicked, this, &AgentPanel::showSessions);
     m_new = toolButton(QStringLiteral("document-new"), i18n("New Chat"));
+    m_new->setObjectName(QStringLiteral("agentNewChat"));
     toolbar->addWidget(m_new);
+    m_restore = toolButton(QStringLiteral("edit-undo"), i18n("Restore last input"));
+    m_restore->setObjectName(QStringLiteral("agentRestoreInput"));
+    m_restore->hide();
+    toolbar->addWidget(m_restore);
     outer->addLayout(toolbar);
 
     // An off-the-record profile, local-only requests, and HTML-disabled Markdown keep
@@ -183,22 +190,16 @@ AgentPanel::AgentPanel(KTextEditor::MainWindow *window, QWidget *parent)
     connect(m_input->document(), &QTextDocument::contentsChanged, this, &AgentPanel::updateInputHeight);
     connect(m_input, &QPlainTextEdit::updateRequest, this, [this] { updateInputHeight(); });
     updateInputHeight();
-    outer->addWidget(m_input);
-    auto footer = new QHBoxLayout;
-    m_status = new QLabel(i18n("Discovering agents…"), this);
-    footer->addWidget(m_status);
-    footer->addStretch();
-    m_restore = new QPushButton(i18n("Restore last input"), this);
-    m_restore->hide();
-    footer->addWidget(m_restore);
-    m_stop = new QPushButton(i18n("Stop"), this);
-    m_stop->setEnabled(false);
-    m_stop->hide();
-    footer->addWidget(m_stop);
-    m_send = new QPushButton(i18n("Send"), this);
+    auto composer = new QHBoxLayout;
+    composer->setContentsMargins(0, 0, 0, 0);
+    composer->addWidget(m_input, 1);
+    m_send = toolButton(QStringLiteral("mail-send"), i18n("Send"));
+    m_send->setObjectName(QStringLiteral("agentSubmit"));
+    m_send->setIcon(QIcon::fromTheme(QStringLiteral("mail-send"), style()->standardIcon(QStyle::SP_ArrowForward)));
     m_send->setEnabled(false);
-    footer->addWidget(m_send);
-    outer->addLayout(footer);
+    composer->addWidget(m_send, 0, Qt::AlignBottom);
+    outer->addLayout(composer);
+    setStatus(i18n("Discovering agents…"));
 
     connect(browse, &QToolButton::clicked, this, &AgentPanel::chooseWorkspace);
     connect(refresh, &QToolButton::clicked, this, [this] {
@@ -223,8 +224,11 @@ AgentPanel::AgentPanel(KTextEditor::MainWindow *window, QWidget *parent)
             item->setToolTip(editor->toPlainText().left(3000));
         }
     });
-    connect(m_send, &QPushButton::clicked, this, &AgentPanel::send);
-    connect(m_restore, &QPushButton::clicked, this, [this] {
+    connect(m_send, &QToolButton::clicked, this, [this] {
+        if (m_busy) command({{QStringLiteral("type"), QStringLiteral("cancel")}});
+        else send();
+    });
+    connect(m_restore, &QToolButton::clicked, this, [this] {
         if (m_input->toPlainText().isEmpty()) m_input->setPlainText(m_lastDraft);
         else m_input->appendPlainText(m_lastDraft);
         for (const auto &[title, text] : std::as_const(m_lastPending)) {
@@ -234,8 +238,20 @@ AgentPanel::AgentPanel(KTextEditor::MainWindow *window, QWidget *parent)
         }
         m_restore->hide();
     });
-    connect(m_stop, &QPushButton::clicked, this, [this] { command({{QStringLiteral("type"), QStringLiteral("cancel")}}); });
-    connect(m_new, &QToolButton::clicked, this, [this] { resetSession(true); });
+    connect(m_new, &QToolButton::clicked, this, [this] {
+        if (m_busy) return;
+        m_workspaceEdited = false;
+        m_workspace->setText(inferWorkspace());
+        resetSession(true);
+        m_model->clear(); m_effort->clear();
+        requestConfiguration();
+    });
+    auto applyConfiguration = [this] {
+        if (m_model->text().trimmed() != m_appliedModel || m_effort->text().trimmed() != m_appliedEffort)
+            requestConfiguration(true);
+    };
+    connect(m_model, &QLineEdit::editingFinished, this, applyConfiguration);
+    connect(m_effort, &QLineEdit::editingFinished, this, applyConfiguration);
     connect(m_workspace, &QLineEdit::textEdited, this, [this] { m_workspaceEdited = true; });
     connect(m_workspace, &QLineEdit::editingFinished, this, [this] {
         if (!m_busy && workspace() != m_sessionWorkspace) {
@@ -244,18 +260,23 @@ AgentPanel::AgentPanel(KTextEditor::MainWindow *window, QWidget *parent)
         }
     });
     connect(m_window, &KTextEditor::MainWindow::viewChanged, this, [this] {
-        if (!m_hasConversation && !m_workspaceEdited && !m_pending->count() && workspace() != inferWorkspace()) {
-            m_workspace->setText(inferWorkspace());
-            if (m_discovered) requestSessions(true);
-        }
+        QTimer::singleShot(0, this, &AgentPanel::syncWorkspace);
+    });
+    watchProject(m_window->pluginView(QStringLiteral("kateprojectplugin")));
+    connect(m_window, &KTextEditor::MainWindow::pluginViewCreated, this, [this](const QString &name, QObject *project) {
+        if (name == QLatin1String("kateprojectplugin")) { watchProject(project); syncWorkspace(); }
+    });
+    connect(m_window, &KTextEditor::MainWindow::pluginViewDeleted, this, [this](const QString &name, QObject *) {
+        if (name == QLatin1String("kateprojectplugin")) QTimer::singleShot(0, this, &AgentPanel::syncWorkspace);
     });
     connect(m_agents, &QComboBox::currentIndexChanged, this, [this] {
         const auto agent = m_agents->currentData().toString();
         if (agent != m_lastAgent) {
-            if (m_hasConversation) resetSession();
+            resetSession();
             m_model->clear(); m_effort->clear();
+            m_lastAgent = agent;
+            requestConfiguration();
         }
-        m_lastAgent = agent;
     });
     connect(m_process, &QProcess::readyReadStandardOutput, this, [this] {
         m_buffer += m_process->readAllStandardOutput();
@@ -309,39 +330,66 @@ void AgentPanel::startBridge()
 {
     if (m_process->state() != QProcess::NotRunning) return;
     if (!m_bridgeDirectory.isValid()) {
-        m_status->setText(i18n("Could not create the agent bridge directory"));
+        setStatus(i18n("Could not create the agent bridge directory"), true);
         return;
     }
     for (const auto name : {QStringLiteral("agent_bridge.py"), QStringLiteral("session_store.py"), QStringLiteral("dsh_questions.mjs")}) {
         QFile source(QStringLiteral(":/agentpanel/bridge/") + name);
         QFile target(m_bridgeDirectory.filePath(name));
         if (!source.open(QIODevice::ReadOnly) || !target.open(QIODevice::WriteOnly)) {
-            m_status->setText(i18n("Could not prepare the agent bridge"));
+            setStatus(i18n("Could not prepare the agent bridge"), true);
             return;
         }
         target.write(source.readAll());
     }
     const auto python = QStandardPaths::findExecutable(QStringLiteral("python3"));
-    if (python.isEmpty()) { m_status->setText(i18n("python3 is required")); return; }
+    if (python.isEmpty()) { setStatus(i18n("python3 is required"), true); return; }
     m_buffer.clear();
     m_process->start(python, {QStringLiteral("-u"), m_bridgeDirectory.filePath(QStringLiteral("agent_bridge.py"))});
 }
 
 QString AgentPanel::inferWorkspace() const
 {
+    if (auto project = m_window->pluginView(QStringLiteral("kateprojectplugin"))) {
+        const auto path = project->property("projectBaseDir").toString();
+        if (!path.isEmpty() && QDir::isAbsolutePath(path) && QFileInfo(path).isDir()) return QDir(path).absolutePath();
+    }
     auto view = m_window->activeView();
     if (view && view->document()->url().isLocalFile()) {
-        QDir dir(QFileInfo(view->document()->url().toLocalFile()).absolutePath());
-        const auto fallback = dir.absolutePath();
-        do {
-            if (dir.exists(QStringLiteral(".git")) || dir.exists(QStringLiteral(".kateproject"))) return dir.absolutePath();
-        } while (dir.cdUp());
-        return fallback;
+        return QFileInfo(view->document()->url().toLocalFile()).absolutePath();
     }
-    return QDir::currentPath();
+    return QDir::homePath();
 }
 
-QString AgentPanel::workspace() const { return QDir(m_workspace->text()).absolutePath(); }
+QString AgentPanel::workspace() const
+{
+    auto path = m_workspace->text().trimmed();
+    if (path == QLatin1String("~")) path = QDir::homePath();
+    else if (path.startsWith(QLatin1String("~/"))) path = QDir::homePath() + path.mid(1);
+    return path.isEmpty() ? inferWorkspace() : QDir(path).absolutePath();
+}
+
+void AgentPanel::watchProject(QObject *project)
+{
+    if (project && project->metaObject()->indexOfSignal("projectFileNameChanged()") >= 0)
+        connect(project, SIGNAL(projectFileNameChanged()), this, SLOT(syncWorkspace()), Qt::UniqueConnection);
+}
+
+void AgentPanel::syncWorkspace()
+{
+    if (!m_busy && !m_hasConversation && !m_workspaceEdited && !m_pending->count() && workspace() != inferWorkspace()) {
+        m_workspace->setText(inferWorkspace());
+        resetSession();
+        if (m_discovered) requestSessions(true);
+    }
+}
+
+void AgentPanel::setStatus(const QString &text, bool error)
+{
+    m_send->setToolTip((m_busy ? i18n("Stop") : i18n("Send")) + QLatin1Char('\n') + text);
+    m_send->setAccessibleDescription(text);
+    if (error) event({{QStringLiteral("type"), QStringLiteral("error")}, {QStringLiteral("text"), text}});
+}
 
 void AgentPanel::chooseWorkspace()
 {
@@ -358,7 +406,7 @@ void AgentPanel::chooseWorkspace()
 void AgentPanel::command(const QJsonObject &object)
 {
     if (m_process->state() != QProcess::Running) {
-        m_status->setText(i18n("Bridge is unavailable — press Refresh"));
+        setStatus(i18n("Bridge is unavailable — press Refresh"), true);
         return;
     }
     m_process->write(QJsonDocument(object).toJson(QJsonDocument::Compact) + '\n');
@@ -367,11 +415,12 @@ void AgentPanel::command(const QJsonObject &object)
 void AgentPanel::send()
 {
     if (m_busy || m_loadingSession || !m_send->isEnabled() || m_agents->currentData().toString().isEmpty()) return;
+    if (m_loadingConfiguration) { m_sendWhenConfigured = true; return; }
     QString text = m_input->toPlainText();
     const QString displayText = text;
     QJsonArray attachments;
     if (text.trimmed().isEmpty() && m_pending->count() == 0) return;
-    if (!QFileInfo(workspace()).isDir()) { m_status->setText(i18n("Choose an existing working directory")); return; }
+    if (!QFileInfo(workspace()).isDir()) { setStatus(i18n("Choose an existing working directory"), true); return; }
     if (m_hasConversation && m_sessionWorkspace != workspace()) resetSession();
     m_lastDraft = displayText;
     m_lastPending.clear();
@@ -403,7 +452,7 @@ void AgentPanel::send()
 void AgentPanel::addContext(KTextEditor::View *view, bool selection)
 {
     if (!view) return;
-    if (selection && !view->selection()) { m_status->setText(i18n("Select text to add it to Pending")); return; }
+    if (selection && !view->selection()) { setStatus(i18n("Select text to add it to Pending"), true); return; }
     if (!m_hasConversation && !m_workspaceEdited && !m_pending->count()) m_workspace->setText(inferWorkspace());
     auto document = view->document();
     const auto cursor = view->cursorPosition();
@@ -440,6 +489,9 @@ void AgentPanel::resetSession(bool forgetLast)
 {
     if (m_busy) return;
     m_sessionsRequest.clear();
+    m_configurationRequest.clear();
+    m_loadingConfiguration = false;
+    m_sendWhenConfigured = false;
     m_loadingSession = false;
     command({{QStringLiteral("type"), QStringLiteral("reset")}, {QStringLiteral("forgetLast"), forgetLast}, {QStringLiteral("cwd"), workspace()}});
     m_history.clear();
@@ -494,10 +546,25 @@ void AgentPanel::requestSessions(bool autoResume, bool refresh)
         m_loadingSession = true;
         m_send->setEnabled(false);
         m_model->setEnabled(false); m_effort->setEnabled(false); m_agents->setEnabled(false);
-        m_status->setText(i18n("Loading local sessions…"));
+        setStatus(i18n("Loading local sessions…"));
     }
     command({{QStringLiteral("type"), QStringLiteral("sessions")}, {QStringLiteral("cwd"), workspace()},
         {QStringLiteral("requestId"), m_sessionsRequest}, {QStringLiteral("autoResume"), autoResume}, {QStringLiteral("refresh"), refresh}});
+}
+
+void AgentPanel::requestConfiguration(bool apply)
+{
+    if (m_busy || m_loadingSession || m_loadingConfiguration || m_agents->currentIndex() < 0
+        || m_process->state() != QProcess::Running || !QFileInfo(workspace()).isDir()) return;
+    m_configurationRequest = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    m_loadingConfiguration = true;
+    m_configurationFailed = false;
+    m_model->setEnabled(false); m_effort->setEnabled(false);
+    setStatus(apply ? i18n("Applying session configuration…") : i18n("Reading session configuration…"));
+    command({{QStringLiteral("type"), apply ? QStringLiteral("configure") : QStringLiteral("prepare")},
+        {QStringLiteral("requestId"), m_configurationRequest}, {QStringLiteral("agent"), m_agents->currentData().toString()},
+        {QStringLiteral("cwd"), workspace()}, {QStringLiteral("model"), m_model->text().trimmed()},
+        {QStringLiteral("effort"), m_effort->text().trimmed()}});
 }
 
 void AgentPanel::updateSessionsView()
@@ -593,7 +660,7 @@ void AgentPanel::event(const QJsonObject &object)
         for (const auto key : object.value(QStringLiteral("environment")).toArray()) keys << key.toString();
         m_agents->setToolTip(keys.isEmpty() ? i18n("Agents use their existing login or configuration.")
             : i18n("Detected environment variables:\n%1", keys.join(QLatin1Char('\n'))));
-        if (!m_busy) m_status->setText(first >= 0 ? i18n("Ready") : i18n("No supported agent found"));
+        if (!m_busy) setStatus(first >= 0 ? i18n("Ready") : i18n("No supported agent found"));
         if (!m_discovered) {
             m_discovered = true;
             requestSessions(true);
@@ -610,8 +677,10 @@ void AgentPanel::event(const QJsonObject &object)
     }
     if (type == QLatin1String("sessions_complete")) {
         if (object.value(QStringLiteral("requestId")).toString() != m_sessionsRequest) return;
+        const bool prepare = m_loadingSession;
         m_loadingSession = false;
         event({{QStringLiteral("type"), QStringLiteral("status")}, {QStringLiteral("busy"), m_busy}, {QStringLiteral("text"), i18n("Ready")}});
+        if (prepare) requestConfiguration();
         return;
     }
     if (type == QLatin1String("resumed")) {
@@ -622,11 +691,31 @@ void AgentPanel::event(const QJsonObject &object)
         m_model->setText(object.value(QStringLiteral("model")).toString());
         m_effort->setText(object.value(QStringLiteral("effort")).toString());
         m_selectedSession = object.value(QStringLiteral("id")).toString();
-        m_sessionWorkspace = workspace(); m_hasConversation = true; m_loadingSession = false;
+        m_sessionWorkspace = workspace(); m_hasConversation = true;
         m_history.clear();
         if (m_ready) Q_EMIT transcriptEvent(QStringLiteral("{\"type\":\"clear\"}"));
         for (const auto item : object.value(QStringLiteral("history")).toArray()) event(item.toObject());
-        m_status->setText(i18n("Resumed: %1", object.value(QStringLiteral("title")).toString()));
+        setStatus(i18n("Resumed: %1", object.value(QStringLiteral("title")).toString()));
+        m_loadingSession = false;
+        requestConfiguration();
+        return;
+    }
+    if (type == QLatin1String("configuration")) {
+        if (object.value(QStringLiteral("requestId")).toString() != m_configurationRequest
+            || object.value(QStringLiteral("agent")).toString() != m_agents->currentData().toString()) return;
+        m_appliedModel = object.value(QStringLiteral("model")).toString();
+        m_appliedEffort = object.value(QStringLiteral("effort")).toString();
+        if (!m_model->isModified() || m_loadingConfiguration) m_model->setText(m_appliedModel);
+        if (!m_effort->isModified() || m_loadingConfiguration) m_effort->setText(m_appliedEffort);
+        return;
+    }
+    if (type == QLatin1String("configuration_complete")) {
+        if (object.value(QStringLiteral("requestId")).toString() != m_configurationRequest) return;
+        m_loadingConfiguration = false;
+        event({{QStringLiteral("type"), QStringLiteral("status")}, {QStringLiteral("busy"), m_busy},
+            {QStringLiteral("text"), m_configurationFailed ? i18n("Configuration failed") : i18n("Ready")}});
+        if (m_sendWhenConfigured && !m_configurationFailed) { m_sendWhenConfigured = false; send(); }
+        else m_sendWhenConfigured = false;
         return;
     }
     if (type == QLatin1String("session")) {
@@ -634,18 +723,25 @@ void AgentPanel::event(const QJsonObject &object)
     }
     if (type == QLatin1String("status")) {
         m_busy = object.value(QStringLiteral("busy")).toBool();
-        m_status->setText(object.value(QStringLiteral("text")).toString());
-        m_send->setEnabled(!m_busy && !m_loadingSession && m_agents->currentIndex() >= 0 && m_process->state() == QProcess::Running);
-        m_stop->setEnabled(m_busy);
-        m_stop->setVisible(m_busy);
-        m_send->setVisible(!m_busy);
+        setStatus(object.value(QStringLiteral("text")).toString());
+        m_send->setEnabled((m_busy || !m_loadingSession) && m_agents->currentIndex() >= 0 && m_process->state() == QProcess::Running);
+        m_send->setIcon(m_busy ? QIcon::fromTheme(QStringLiteral("process-stop"), style()->standardIcon(QStyle::SP_MediaStop))
+            : QIcon::fromTheme(QStringLiteral("mail-send"), style()->standardIcon(QStyle::SP_ArrowForward)));
+        m_send->setText(m_busy ? i18n("Stop") : i18n("Send"));
+        m_send->setAccessibleName(m_send->text());
         m_agents->setEnabled(!m_busy && !m_loadingSession);
         m_workspace->setEnabled(!m_busy);
         m_new->setEnabled(!m_busy);
         m_sessions->setEnabled(!m_busy);
-        m_model->setEnabled(!m_busy && !m_loadingSession);
-        m_effort->setEnabled(!m_busy && !m_loadingSession);
+        m_model->setEnabled(!m_busy && !m_loadingSession && !m_loadingConfiguration);
+        m_effort->setEnabled(!m_busy && !m_loadingSession && !m_loadingConfiguration);
+        if (m_ready) Q_EMIT transcriptEvent(QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact)));
         return;
+    }
+    if (type == QLatin1String("error") && (object.value(QStringLiteral("operation")) == QLatin1String("prepare")
+        || object.value(QStringLiteral("operation")) == QLatin1String("configure"))) {
+        if (object.value(QStringLiteral("requestId")).toString() != m_configurationRequest) return;
+        m_configurationFailed = true;
     }
     if (type == QLatin1String("error") && (object.value(QStringLiteral("operation")) == QLatin1String("sessions") || object.value(QStringLiteral("operation")) == QLatin1String("resume"))) {
         m_loadingSession = false;
@@ -679,6 +775,7 @@ void AgentPanel::rendererReady()
     m_ready = true;
     Q_EMIT transcriptEvent(QStringLiteral("{\"type\":\"clear\"}"));
     for (const auto &object : m_history) Q_EMIT transcriptEvent(QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact)));
+    if (m_busy) Q_EMIT transcriptEvent(QStringLiteral("{\"type\":\"status\",\"busy\":true}"));
     updateTheme();
 }
 
@@ -729,7 +826,7 @@ void AgentPanel::openLink(const QString &href)
         return;
     }
     const auto file = resolveFileLink(href, m_sessionWorkspace.isEmpty() ? workspace() : m_sessionWorkspace);
-    if (!file.valid) { m_status->setText(i18n("File not found: %1", href.left(150))); return; }
+    if (!file.valid) { setStatus(i18n("File not found: %1", href.left(150)), true); return; }
     if (auto view = m_window->openUrl(file.url)) {
         view->removeSelection();
         const int line = qMin(file.line, qMax(0, view->document()->lines() - 1));

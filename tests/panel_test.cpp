@@ -72,6 +72,7 @@ public:
     QPointer<QWidget> tool;
     QPointer<QWidget> shown;
     QWidget *toolParent = nullptr;
+    QObject *project = nullptr;
     int hideCount = 0;
     bool managedLayout = true;
     QPointer<QLayout> toolLayout;
@@ -79,6 +80,7 @@ public:
     KTextEditor::MainWindow::ToolViewPosition toolPosition = KTextEditor::MainWindow::Left;
 public Q_SLOTS:
     KTextEditor::View *activeView() { return view; }
+    QObject *pluginView(const QString &name) { return name == QLatin1String("kateprojectplugin") ? project : nullptr; }
     KTextEditor::View *openUrl(const QUrl &url, const QString &)
     {
         opened = url;
@@ -377,7 +379,8 @@ private Q_SLOTS:
         QDir().mkpath(workspace + QStringLiteral("/.git"));
         const auto filename = workspace + QStringLiteral("/src/test.cpp");
         QFile file(filename); QVERIFY(file.open(QIODevice::WriteOnly)); file.write("saved\n"); file.close();
-        Host host;
+        QObject project; project.setProperty("projectBaseDir", workspace);
+        Host host; host.project = &project;
         KTextEditor::MainWindow mainWindow(&host);
         QWidget editorParent;
         auto document = KTextEditor::Editor::instance()->createDocument(&editorParent);
@@ -419,11 +422,10 @@ private Q_SLOTS:
             return ready;
         })(), 15000);
         input->setPlainText(QStringLiteral("Render the selected context"));
-        QPushButton *send = nullptr;
-        for (auto button : panel.findChildren<QPushButton *>()) if (button->text() == QStringLiteral("Send")) send = button;
+        auto send = panel.findChild<QToolButton *>(QStringLiteral("agentSubmit"));
         QVERIFY(send); QTRY_VERIFY_WITH_TIMEOUT(send->isEnabled(), 5000);
         QTest::mouseClick(send, Qt::LeftButton);
-        QTRY_VERIFY_WITH_TIMEOUT(send->isEnabled(), 10000);
+        QTRY_COMPARE_WITH_TIMEOUT(send->text(), QStringLiteral("Send"), 10000);
         QCOMPARE(pending->count(), 0);
         QVERIFY(!pending->isVisible());
         bool rendered = false;
@@ -446,8 +448,7 @@ private Q_SLOTS:
         input->setPlainText(QStringLiteral("crash"));
         QTest::mouseClick(send, Qt::LeftButton);
         input->setPlainText(QStringLiteral("New draft"));
-        QPushButton *restore = nullptr;
-        for (auto button : panel.findChildren<QPushButton *>()) if (button->text() == QStringLiteral("Restore last input")) restore = button;
+        auto restore = panel.findChild<QToolButton *>(QStringLiteral("agentRestoreInput"));
         QVERIFY(restore);
         QTRY_VERIFY_WITH_TIMEOUT(restore->isVisible(), 5000);
         panel.addContext(host.view, false);
@@ -657,9 +658,9 @@ $also literal$
         auto input = panel.findChild<QPlainTextEdit *>();
         QTRY_VERIFY_WITH_TIMEOUT(agents->count() >= 7, 10000);
         agents->setCurrentIndex(agents->findData(agent));
-        QPushButton *send = nullptr;
-        for (auto button : panel.findChildren<QPushButton *>()) if (button->text() == QStringLiteral("Send")) send = button;
-        QVERIFY(send); QVERIFY(send->isEnabled());
+        auto send = panel.findChild<QToolButton *>(QStringLiteral("agentSubmit"));
+        QVERIFY(send); QTRY_VERIFY_WITH_TIMEOUT(send->isEnabled(), 15000);
+        QTRY_VERIFY_WITH_TIMEOUT(!panel.findChild<QLineEdit *>(QStringLiteral("agentModelId"))->text().isEmpty(), 15000);
         QTRY_VERIFY_WITH_TIMEOUT(evaluate(browser, QStringLiteral("!!document.documentElement?.style.getPropertyValue('--font-size')")).toBool(), 15000);
         QSignalSpy events(&panel, &AgentPanel::transcriptEvent);
         const QStringList prompts = {
@@ -674,8 +675,8 @@ $also literal$
             events.clear();
             input->setPlainText(prompts[turn]);
             QTest::mouseClick(send, Qt::LeftButton);
-            QVERIFY(!send->isEnabled());
-            QTRY_VERIFY_WITH_TIMEOUT(send->isEnabled(), 180000);
+            QTRY_COMPARE(send->text(), QStringLiteral("Stop"));
+            QTRY_COMPARE_WITH_TIMEOUT(send->text(), QStringLiteral("Send"), 180000);
             QStringList errors;
             bool tool = false;
             for (const auto &record : events) {
@@ -811,6 +812,99 @@ $also literal$
         QInputMethodEvent commit; commit.setCommitString(QStringLiteral(" committed"));
         QApplication::sendEvent(input, &commit);
         QVERIFY(!input->toPlainText().isEmpty());
+    }
+
+    void effectiveConfigurationUpdatesBeforeSending()
+    {
+        Host host; KTextEditor::MainWindow mainWindow(&host);
+        AgentPanel panel(&mainWindow); panel.resize(1000, 400); panel.show();
+        auto model = panel.findChild<QLineEdit *>(QStringLiteral("agentModelId"));
+        auto effort = panel.findChild<QLineEdit *>(QStringLiteral("agentReasoningEffort"));
+        auto browser = panel.findChild<QWebEngineView *>();
+        QTRY_COMPARE(model->text(), QStringLiteral("fake-model"));
+        QTRY_VERIFY(model->isEnabled());
+        QCOMPARE(effort->text(), QStringLiteral("off"));
+        panel.activateWindow();
+        model->setFocus(); QTRY_VERIFY(model->hasFocus());
+        model->selectAll(); QTest::keyClicks(model, "other-model");
+        QTest::keyClick(model, Qt::Key_Tab);
+        QVERIFY(!model->isEnabled());
+        QTRY_VERIFY(model->isEnabled());
+        QCOMPARE(model->text(), QStringLiteral("other-model"));
+        effort->setFocus(); QTRY_VERIFY(effort->hasFocus()); effort->selectAll(); QTest::keyClicks(effort, "high");
+        QTest::keyClick(effort, Qt::Key_Tab);
+        QVERIFY(!effort->isEnabled());
+        QTRY_VERIFY(effort->isEnabled());
+        QCOMPARE(effort->text(), QStringLiteral("high"));
+        QVERIFY(waitForScript(browser, QStringLiteral("typeof nativePanel !== 'undefined'")));
+        QCOMPARE(evaluate(browser, QStringLiteral("document.querySelectorAll('.user').length")).toInt(), 0);
+        model->setFocus(); QTRY_VERIFY(model->hasFocus()); model->selectAll(); QTest::keyClicks(model, "missing-model");
+        QTest::keyClick(model, Qt::Key_Tab);
+        QVERIFY(!model->isEnabled());
+        QTRY_VERIFY(model->isEnabled());
+        QTRY_COMPARE(model->text(), QStringLiteral("other-model"));
+        QVERIFY(waitForScript(browser, QStringLiteral("!!document.querySelector('.error')")));
+    }
+
+    void newSessionDirectoryUsesProjectFileThenHome()
+    {
+        QTemporaryDir temp;
+        const auto projectPath = temp.path() + QStringLiteral("/project");
+        const auto filePath = temp.path() + QStringLiteral("/files/example.cpp");
+        QVERIFY(QDir().mkpath(projectPath));
+        QVERIFY(QDir().mkpath(QFileInfo(filePath).absolutePath()));
+        QFile file(filePath); QVERIFY(file.open(QIODevice::WriteOnly)); file.write("// example\n"); file.close();
+        QObject project; project.setProperty("projectBaseDir", projectPath);
+        Host host; host.project = &project;
+        KTextEditor::MainWindow mainWindow(&host);
+        QWidget editorParent;
+        auto document = KTextEditor::Editor::instance()->createDocument(&editorParent);
+        QVERIFY(document->openUrl(QUrl::fromLocalFile(filePath)));
+        host.view = document->createView(&editorParent, &mainWindow);
+        AgentPanel panel(&mainWindow); panel.resize(1000, 400); panel.show();
+        auto directory = panel.findChild<QLineEdit *>(QStringLiteral("agentWorkspace"));
+        auto fresh = panel.findChild<QToolButton *>(QStringLiteral("agentNewChat"));
+        auto model = panel.findChild<QLineEdit *>(QStringLiteral("agentModelId"));
+        QCOMPARE(directory->text(), projectPath);
+        QTRY_VERIFY(model->isEnabled() && !model->text().isEmpty());
+        directory->setFocus(); directory->selectAll(); QTest::keyClicks(directory, QDir::homePath());
+        fresh->click();
+        QCOMPARE(directory->text(), projectPath);
+        host.project = nullptr;
+        fresh->click();
+        QCOMPARE(directory->text(), QFileInfo(filePath).absolutePath());
+        host.view = nullptr;
+        fresh->click();
+        QCOMPARE(directory->text(), QDir::homePath());
+        QTRY_VERIFY(model->isEnabled());
+    }
+
+    void inlineSendStopAndAnimatedTurnSummary()
+    {
+        Host host; KTextEditor::MainWindow mainWindow(&host);
+        AgentPanel panel(&mainWindow); panel.resize(1000, 400); panel.show();
+        auto input = panel.findChild<QPlainTextEdit *>();
+        auto submit = panel.findChild<QToolButton *>(QStringLiteral("agentSubmit"));
+        auto model = panel.findChild<QLineEdit *>(QStringLiteral("agentModelId"));
+        auto browser = panel.findChild<QWebEngineView *>();
+        QTRY_VERIFY(model->isEnabled() && !model->text().isEmpty());
+        QVERIFY(waitForScript(browser, QStringLiteral("typeof nativePanel !== 'undefined'")));
+        QVERIFY(submit->x() > input->geometry().right());
+        QCOMPARE(submit->geometry().bottom(), input->geometry().bottom());
+        QVERIFY(panel.height() - input->geometry().bottom() <= 6);
+        QVERIFY(!submit->icon().isNull());
+        input->setPlainText(QStringLiteral("hang")); QTest::keyClick(input, Qt::Key_Return);
+        QTRY_COMPARE(submit->text(), QStringLiteral("Stop"));
+        QVERIFY(submit->isEnabled());
+        QVERIFY(waitForScript(browser, QStringLiteral("document.querySelector('#conversation > :last-child')?.classList.contains('activity')")));
+        const auto dots = evaluate(browser, QStringLiteral("document.querySelector('.activity-dots').textContent")).toString();
+        QTRY_VERIFY(evaluate(browser, QStringLiteral("document.querySelector('.activity-dots').textContent")).toString() != dots);
+        submit->click();
+        QTRY_COMPARE(submit->text(), QStringLiteral("Send"));
+        QVERIFY(waitForScript(browser, QStringLiteral("!document.querySelector('.activity') && document.querySelector('.turn-summary')?.textContent.includes('Stopped in')")));
+        input->setPlainText(QStringLiteral("hello")); QTest::keyClick(input, Qt::Key_Return);
+        QVERIFY(waitForScript(browser, QStringLiteral("document.querySelectorAll('.turn-summary').length === 2 && [...document.querySelectorAll('.turn-summary')].at(-1).textContent.includes('Completed in')")));
+        QVERIFY(panel.grab().save(QStringLiteral(SOURCE_DIR "/build/configuration-preview.png")));
     }
 
     void localSessionsRestoreHistoryAndParameters()
