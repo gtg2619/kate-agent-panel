@@ -8,7 +8,10 @@
 #include <KXMLGUIClient>
 #include <KXMLGUIFactory>
 #include <QAction>
+#include <QApplication>
+#include <QIcon>
 #include <QMenu>
+#include <QStyle>
 #include <QVBoxLayout>
 
 class AgentPluginView : public QObject, public KXMLGUIClient
@@ -18,17 +21,24 @@ public:
     AgentPluginView(KTextEditor::Plugin *plugin, KTextEditor::MainWindow *window)
         : QObject(window), m_window(window)
     {
+        const auto agentIcon = QIcon::fromTheme(QStringLiteral("dialog-messages"),
+            QApplication::style()->standardIcon(QStyle::SP_MessageBoxInformation));
         m_tool = window->createToolView(plugin, QStringLiteral("kate_agent_panel"),
-            KTextEditor::MainWindow::Bottom, QIcon::fromTheme(QStringLiteral("assistant")), i18n("Agent"));
+            KTextEditor::MainWindow::Bottom, agentIcon, i18n("Agent"));
         if (!m_tool) return;
-        auto layout = new QVBoxLayout(m_tool);
-        layout->setContentsMargins(0, 0, 0, 0);
+        // Kate owns this layout and may automatically insert child widgets.
+        auto layout = m_tool->layout();
+        if (!layout) {
+            layout = new QVBoxLayout(m_tool);
+            layout->setContentsMargins(0, 0, 0, 0);
+        }
         m_panel = new AgentPanel(window, m_tool);
-        layout->addWidget(m_panel);
+        if (layout->indexOf(m_panel) < 0) layout->addWidget(m_panel);
         setComponentName(QStringLiteral("kateagentpanel"), i18n("Agent Panel"));
         setXMLFile(QStringLiteral(":/agentpanel/ui.rc"));
 
         auto show = actionCollection()->addAction(QStringLiteral("agent_panel_show"));
+        show->setIcon(agentIcon);
         show->setText(i18n("Show Agent Panel"));
         KActionCollection::setDefaultShortcut(show, QKeySequence(QStringLiteral("Ctrl+Alt+A")));
         connect(show, &QAction::triggered, this, [this] { m_window->showToolView(m_tool); });

@@ -23,7 +23,7 @@ Other platforms remain unverified.
 | Transport | Fragmented UTF-8, noisy stdout, oversized records, malformed input, EOF cleanup, busy sends, process-group termination and kill escalation |
 | Sessions | All seven adapter entry points; multiple turns; agent/workspace changes; ACP version negotiation, errors, reload and fallback; ZCode exit-before-ready |
 | Interaction | Permission allow/deny, cancelled and stale replies, unknown client methods, partial tool updates, question conversion |
-| Native editor | Real plugin load/unload, shortcuts, clicked split-view context, unsaved snapshots, Pending, failure recovery, actual file-link clicks |
+| Native editor | Plugin load/unload, Kate-owned tool-view layout, resize/hide/show, icon theme fallbacks, shortcuts, split-view context, Pending, failure recovery, file-link clicks |
 | Transcript | Left alignment, collapsed process output, pinned composer, scroll retention, theme/font updates, reload, bounded entries, permission forms |
 | Files | Workspace/absolute/file URLs, Unicode/space/percent paths, line/column/range selection, generated round trips, invalid locations and schemes |
 | Rendering | Four math delimiters, matrices, aligned equations, lists/quotes, streaming, errors, code isolation, nested links, KaTeX fonts, escaped HTML and blocked network access |
@@ -31,6 +31,9 @@ Other platforms remain unverified.
 
 Qt integration tests use real KTextEditor documents/views and WebEngine with a
 small MainWindow test host. They do not replace a manual check in a full Kate window.
+The host models Kate's existing layout and automatic child insertion. A full Kate
+26.08.2 window was also checked locally under Xvfb at 100% and 200% scaling,
+including a dark GTK theme. Wayland rendering remains unverified.
 Unicode cases use escaped data; project UI, documentation, and test descriptions are English.
 
 ## Live tests

@@ -9,12 +9,14 @@
 #include <KXMLGUIClient>
 #include <KXMLGUIFactory>
 #include <QApplication>
+#include <QChildEvent>
 #include <QClipboard>
 #include <QComboBox>
 #include <QDir>
 #include <QEventLoop>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QFrame>
 #include <QJsonDocument>
 #include <QLineEdit>
 #include <QListWidget>
@@ -28,8 +30,32 @@
 #include <QTest>
 #include <QTimer>
 #include <QUuid>
+#include <QVBoxLayout>
 #include <QWebEnginePage>
 #include <QWebEngineView>
+
+// Kate owns the tool-view layout and automatically inserts child widgets.
+class KateToolViewHost : public QFrame
+{
+public:
+    KateToolViewHost()
+    {
+        auto box = new QVBoxLayout(this);
+        box->setContentsMargins(0, 0, 0, 0);
+        box->setSpacing(0);
+    }
+protected:
+    void childEvent(QChildEvent *event) override
+    {
+        if (event->added()) {
+            if (auto widget = qobject_cast<QWidget *>(event->child())) {
+                layout()->addWidget(widget);
+                setFocusProxy(widget);
+            }
+        }
+        QFrame::childEvent(event);
+    }
+};
 
 class Host : public QObject
 {
@@ -39,6 +65,9 @@ public:
     QUrl opened;
     QPointer<QWidget> tool;
     QPointer<QWidget> shown;
+    bool managedLayout = true;
+    QPointer<QLayout> toolLayout;
+    QIcon toolIcon;
     KTextEditor::MainWindow::ToolViewPosition toolPosition = KTextEditor::MainWindow::Left;
 public Q_SLOTS:
     KTextEditor::View *activeView() { return view; }
@@ -54,9 +83,13 @@ public Q_SLOTS:
     bool showToolView(QWidget *widget) { shown = widget; return true; }
     KXMLGUIFactory *guiFactory() { return nullptr; }
     QList<KTextEditor::View *> views() { return view ? QList<KTextEditor::View *>{view} : QList<KTextEditor::View *>{}; }
-    QWidget *createToolView(KTextEditor::Plugin *, const QString &, KTextEditor::MainWindow::ToolViewPosition position, const QIcon &, const QString &)
+    QWidget *createToolView(KTextEditor::Plugin *, const QString &, KTextEditor::MainWindow::ToolViewPosition position, const QIcon &icon, const QString &)
     {
-        toolPosition = position; tool = new QWidget; return tool;
+        toolPosition = position;
+        toolIcon = icon;
+        tool = managedLayout ? new KateToolViewHost : new QWidget;
+        toolLayout = tool->layout();
+        return tool;
     }
 };
 
@@ -94,9 +127,18 @@ private Q_SLOTS:
         qputenv("KATE_AGENT_PI_COMMAND", QByteArray("python3 ") + SOURCE_DIR + "/tests/fake_agent.py");
     }
 
+    void pluginLoadsAtBottomAndUnloads_data()
+    {
+        QTest::addColumn<bool>("managedLayout");
+        QTest::newRow("kate-toolview") << true;
+        QTest::newRow("plain-toolview") << false;
+    }
+
     void pluginLoadsAtBottomAndUnloads()
     {
+        QFETCH(bool, managedLayout);
         Host host;
+        host.managedLayout = managedLayout;
         KTextEditor::MainWindow mainWindow(&host);
         QPluginLoader loader(QStringLiteral(PLUGIN_FILE));
         auto factory = qobject_cast<KPluginFactory *>(loader.instance());
@@ -106,9 +148,74 @@ private Q_SLOTS:
         auto pluginView = plugin->createView(&mainWindow);
         QVERIFY(pluginView); QVERIFY(host.tool);
         QCOMPARE(host.toolPosition, KTextEditor::MainWindow::Bottom);
+        auto panel = host.tool->findChild<QWidget *>(QStringLiteral("kateAgentPanel"));
+        QVERIFY(panel);
+        QVERIFY(host.tool->layout());
+        if (managedLayout) QCOMPARE(host.tool->layout(), host.toolLayout.data());
+        QVERIFY2(host.tool->layout()->indexOf(panel) >= 0, "The panel must remain in Kate's installed layout");
+        host.tool->resize(900, 350);
+        host.tool->show();
+        QVERIFY(QTest::qWaitForWindowExposed(host.tool));
+        for (const QSize size : {QSize(900, 350), QSize(1200, 550), QSize(700, 260)}) {
+            host.tool->resize(size);
+            QTRY_COMPARE(panel->geometry(), host.tool->contentsRect());
+            auto input = panel->findChild<QPlainTextEdit *>();
+            auto browser = panel->findChild<QWebEngineView *>();
+            QVERIFY(input); QVERIFY(browser);
+            QVERIFY(panel->rect().contains(input->geometry()));
+            QVERIFY(panel->rect().contains(browser->geometry()));
+            QVERIFY(input->y() >= browser->geometry().bottom());
+        }
+        host.tool->hide();
+        host.tool->show();
+        QTRY_COMPARE(panel->geometry(), host.tool->contentsRect());
         delete pluginView;
         QVERIFY(!host.tool);
         delete plugin;
+    }
+
+    void pluginIconWithAndWithoutTheme_data()
+    {
+        QTest::addColumn<QString>("theme");
+        QTest::newRow("breeze") << QStringLiteral("breeze");
+        QTest::newRow("breeze-dark") << QStringLiteral("breeze-dark");
+        QTest::newRow("missing-theme") << QString();
+    }
+
+    void pluginIconWithAndWithoutTheme()
+    {
+        QFETCH(QString, theme);
+        const auto originalTheme = QIcon::themeName();
+        const auto originalFallback = QIcon::fallbackThemeName();
+        const auto originalPaths = QIcon::themeSearchPaths();
+        const auto originalFallbackPaths = QIcon::fallbackSearchPaths();
+        auto restore = qScopeGuard([&] {
+            QIcon::setThemeSearchPaths(originalPaths);
+            QIcon::setFallbackSearchPaths(originalFallbackPaths);
+            QIcon::setFallbackThemeName(originalFallback);
+            QIcon::setThemeName(originalTheme);
+        });
+        QTemporaryDir emptyTheme;
+        if (theme.isEmpty()) {
+            QIcon::setThemeSearchPaths({emptyTheme.path()});
+            QIcon::setFallbackSearchPaths({emptyTheme.path()});
+            QIcon::setFallbackThemeName(QString());
+            QIcon::setThemeName(QStringLiteral("missing-agent-test-theme"));
+        } else {
+            QIcon::setThemeName(theme);
+        }
+        Host host;
+        KTextEditor::MainWindow mainWindow(&host);
+        QPluginLoader loader(QStringLiteral(PLUGIN_FILE));
+        auto factory = qobject_cast<KPluginFactory *>(loader.instance());
+        QVERIFY2(factory, qPrintable(loader.errorString()));
+        auto plugin = factory->create<KTextEditor::Plugin>(&host);
+        QVERIFY(plugin);
+        auto pluginView = plugin->createView(&mainWindow);
+        auto cleanup = qScopeGuard([&] { delete pluginView; delete plugin; });
+        QVERIFY2(!host.toolIcon.isNull(), "The Agent tab needs an icon, even without an icon theme");
+        QVERIFY(!host.toolIcon.pixmap(16, 16).isNull());
+        QVERIFY(!host.toolIcon.pixmap(32, 32).isNull());
     }
 
     void editorContextAndRenderedRoundTrip()
