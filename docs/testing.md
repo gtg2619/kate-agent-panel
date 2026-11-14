@@ -13,7 +13,9 @@ suite; no agent package or credential is required.
 
 Local validation uses Fedora 45, Qt 6.11.2, and KF6 6.31. GitHub Actions also passed
 the Python 3.10/3.13 unit jobs and the Fedora 43 native suite on 2026-11-14.
-Other platforms remain unverified.
+The current offline run passes all five CTest suites, including 75 Python tests
+and 22 Qt test cases; the two real-provider Qt cases are opt-in. Other platforms
+remain unverified.
 
 ## Coverage
 
@@ -21,11 +23,12 @@ Other platforms remain unverified.
 |---|---|
 | Discovery | Command overrides, argv quoting, credential-name-only inventory, existing Harness profile requirement |
 | Transport | Fragmented UTF-8, noisy stdout, oversized records, malformed input, EOF cleanup, busy sends, process-group termination and kill escalation |
-| Sessions | All seven adapter entry points; multiple turns; agent/workspace changes; ACP version negotiation, errors, reload and fallback; ZCode exit-before-ready |
-| Interaction | Permission allow/deny, cancelled and stale replies, unknown client methods, partial tool updates, question conversion |
+| Sessions | All seven adapters; persistent turns; canonical workspace filtering; read-only metadata imports; cache restart; New Chat; unavailable agents; stale discovery; ACP capability-dependent resume; UTF-8 history limits |
+| Parameters | Blank defaults, model/effort forwarding, process restart with session preservation, ACP config IDs, unsupported effort, ZCode model-default reasoning and session-only updates |
+| Interaction | Single/multiple/custom/secret answers, required fields, typed values, dismiss, failed-write retry, permissions, Codex MCP elicitation, server-resolved requests, DSH native socket/hook lifecycle |
 | Native editor | Deferred startup, hidden/visible session restore, host palette/layout preservation, load/unload, resize/hide/show, icon fallbacks, shortcuts, split-view context, Pending, failure recovery, file-link clicks |
 | Focus | First-click composer focus, Esc from composer/transcript/workspace/Pending, dialog dismissal, return to editor, draft/context retention, focus on reopening |
-| Transcript | Left alignment, collapsed process output, pinned composer, scroll retention, theme/font updates, reload, bounded entries, permission forms |
+| Transcript | Left alignment, collapsed process output, visible errors, pinned one/two-line composer, Enter/Ctrl+Enter, IME protection, scroll retention, theme/font updates, reload, restored history, local-session dialog |
 | Files | Workspace/absolute/file URLs, Unicode/space/percent paths, line/column/range selection, generated round trips, invalid locations and schemes |
 | Rendering | Four math delimiters, matrices, aligned equations, lists/quotes, streaming, errors, code isolation, nested links, KaTeX fonts, escaped HTML and blocked network access |
 | Packaging | Local HTML/font dependencies, licenses, English first-party text |
@@ -58,15 +61,38 @@ Run them separately:
 ./scripts/test.sh --live zcode
 ```
 
-Each test creates a temporary workspace, checks two-turn memory, asks the agent to
+Each run creates temporary workspaces, checks two-turn memory, asks the agent to
 read a file, verifies the response's math, clicks its reference, and checks that
-lines 123-234 are selected and the file is unchanged. No permission is auto-approved.
+lines 123-234 are selected and the file is unchanged. A second native test answers
+a choice prompt, reopens the panel, and checks restored-session memory.
+No permission is auto-approved.
 ZCode needs a configured provider; the test does not create one.
 
 Verified locally on 2026-11-14: ZCode CLI 0.17.1 and DeepSeek Harness 0.2.2-rc.1,
 using `deepseek-flash`. ZCode used a temporary provider outside the repository.
-Other real agents, write approvals, and cancellation against live providers remain
-unverified. Protocol fixtures do not establish compatibility with every CLI version.
+Additional real-provider probes exercised a model override, a native single-choice
+question answered through the panel bridge, process shutdown, and restored-session
+memory. Neither probe changed the original CLI configuration. The first turn took
+about 3-5 seconds locally, including provider latency; this is not a benchmark.
+
+Kimi's real ACP initialization/config surface and workspace-filtered session listing
+were checked. Codex 0.167.2 protocol types, Pi 1.5.0 RPC types, Claude's control
+messages, and current upstream Kimi/ZCode/DSH/Hermes implementations informed the
+fixtures. Hermes was not installed. Other real-provider conversations, live write
+approvals, and live cancellation remain unverified. Fixtures do not establish
+compatibility with every CLI version.
+
+Cached-session tests hold native discovery indefinitely and verify that history is
+restored and input becomes ready first. The CLI process is not started until Send.
+Metadata discovery runs outside the bridge event loop; Kimi's listing has a three
+second deadline. Discovery scans at most 2,000 candidate records per file/database
+source and keeps the newest 500 matching sessions. The panel caches recent history;
+the CLI remains responsible for its full conversation and tool state.
+
+Hermes' current ACP adapter accepts only ACP-origin persisted sessions. Its model
+setting uses ACP's legacy model endpoint, while unsupported reasoning effort is
+reported explicitly. The reviewed adapter does not install the native `clarify`
+callback. No Hermes choice-prompt compatibility is claimed.
 
 ## Reference designs
 
@@ -77,6 +103,10 @@ Reviewed on 2026-11-14. These informed our tests; no upstream suite is being cla
 | [Zed ACP thread tests](https://github.com/zed-industries/zed/blob/main/crates/acp_thread/src/acp_thread.rs) | Preserve omitted tool fields, distinguish tool completion from permission, exercise state transitions |
 | [Avante ACP integration](https://github.com/avante-corp/avante.nvim/blob/main/README.md#acp-support) | Test connection shutdown, bounded transport, capability-dependent resume |
 | [ACP Test Compatibility Kit](https://github.com/agentclientprotocol/acp-tck#what-is-covered) | Version negotiation, lifecycle/error scenarios, transport hygiene, explicit skipped coverage |
+| [Kimi ACP reference](https://github.com/MoonshotAI/kimi-code/blob/main/docs/en/reference/kimi-acp.md) | Form elicitation, configuration options, resume and session listing |
+| [ZCode protocol](https://github.com/zai-org/ZCode/blob/main/docs/zcode-protocol.md) | Session server, runtime model settings, native permission/question responses |
+| [DSH ACP frontend](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/acp/acp/README.md) | Automation-only boundary; use the native question service in the current process |
+| [Hermes ACP adapter](https://github.com/NousResearch/hermes-agent/tree/main/acp_adapter) | Verify persisted-session scope and unsupported settings rather than assuming parity |
 
 ACP-TCK tests agents; this repository tests an editor client with controlled agent
 fixtures. It is not an ACP conformance certification. Our Stop action terminates the

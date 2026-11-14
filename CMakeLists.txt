@@ -20,7 +20,7 @@ target_compile_definitions(kateagentpanel PRIVATE TRANSLATION_DOMAIN="kateagentp
 
 file(GLOB_RECURSE PANEL_ASSETS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/web/*")
 qt_add_resources(kateagentpanel agent_assets PREFIX "/agentpanel" BASE "${CMAKE_CURRENT_SOURCE_DIR}"
-    FILES ${PANEL_ASSETS} bridge/agent_bridge.py ui.rc)
+    FILES ${PANEL_ASSETS} bridge/agent_bridge.py bridge/session_store.py bridge/dsh_questions.mjs ui.rc)
 
 include(CTest)
 if(BUILD_TESTING)
@@ -39,7 +39,7 @@ if(BUILD_TESTING)
     target_compile_definitions(panel_test PRIVATE TRANSLATION_DOMAIN="kateagentpanel" SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}" PLUGIN_FILE="$<TARGET_FILE:kateagentpanel>")
     add_dependencies(panel_test kateagentpanel)
     qt_add_resources(panel_test test_assets PREFIX "/agentpanel" BASE "${CMAKE_CURRENT_SOURCE_DIR}"
-        FILES ${PANEL_ASSETS} bridge/agent_bridge.py)
+        FILES ${PANEL_ASSETS} bridge/agent_bridge.py bridge/session_store.py bridge/dsh_questions.mjs)
     add_test(NAME panel COMMAND panel_test)
     set_tests_properties(bridge PROPERTIES TIMEOUT 60 LABELS "protocol;offline")
     set_tests_properties(filelink renderer PROPERTIES TIMEOUT 30 LABELS "rendering;offline")

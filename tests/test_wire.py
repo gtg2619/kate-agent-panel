@@ -15,6 +15,7 @@ class WireTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
         env = dict(os.environ, KATE_AGENT_PI_COMMAND=shlex.join([sys.executable, str(ROOT / 'tests/fake_agent.py')]),
+                   KATE_AGENT_STATE_HOME=self.temp.name + '/state', KATE_AGENT_DISABLE_NATIVE_DISCOVERY='1',
                    OPENAI_API_KEY='fixture-secret-do-not-emit')
         self.process = await asyncio.create_subprocess_exec(sys.executable, '-u', str(ROOT / 'bridge/agent_bridge.py'),
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env)

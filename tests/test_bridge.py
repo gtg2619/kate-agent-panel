@@ -105,14 +105,13 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
     async def test_zcode_keeps_unknown_events_and_session(self):
         adapter = module.ZCodeAdapter(self.bridge, 'zcode', '/tmp')
         adapter.busy = True
-        await adapter.handle({'type': 'model.streaming', 'payload': {'kind': 'text_delta', 'delta': 'streamed'}})
+        adapter.session = 's1'
+        await adapter.handle({'method':'session/event','params':{'sessionId':'s1','type': 'model.streaming', 'payload': {'kind': 'text_delta', 'delta': 'streamed'}}})
         self.assertTrue(self.events[-1]['append']); self.assertEqual(self.events[-1]['text'], 'streamed')
         await adapter.handle({'type': 'future-event', 'payload': 'progress'})
         self.assertIn('progress', self.events[-1]['text'])
-        await adapter.handle({'type': 'result', 'sessionId': 's1', 'response': 'answer'})
-        self.assertEqual(adapter.session, 's1'); self.assertEqual(self.events[-1]['text'], 'answer')
-        self.assertTrue(adapter.busy)
-        adapter.process_exited(0)
+        await adapter.handle({'method':'session/event','params':{'sessionId':'s1','type':'turn.completed','payload':{'response':'answer','resultType':'success'}}})
+        self.assertEqual(adapter.session, 's1'); self.assertEqual(self.events[-2]['text'], 'answer')
         self.assertFalse(adapter.busy)
 
     async def test_codex_question_and_unrecognized_approval(self):
@@ -226,16 +225,18 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(self.bridge.adapter.process, process)
             self.assertTrue(any(e.get('text') == 'answer 2' for e in self.events))
 
-    async def test_zcode_waits_for_exit_before_accepting_next_turn(self):
+    async def test_zcode_reuses_server_after_turn_completed(self):
         with patch.dict(os.environ, {'KATE_AGENT_ZCODE_COMMAND': f'{sys.executable} {ROOT / "tests/fake_protocol_agent.py"} zcode'}):
             await self.bridge.dispatch({'type': 'send', 'agent': 'zcode', 'cwd': self.temp.name, 'text': 'first'})
             await self.wait_for(lambda: any(e.get('text') == 'first' for e in self.events))
             self.assertTrue(self.bridge.adapter.busy)
             await self.wait_for(lambda: not self.bridge.adapter.busy)
-            self.assertEqual(self.bridge.adapter.process.returncode, 0)
+            process = self.bridge.adapter.process
+            self.assertIsNone(process.returncode)
             await self.bridge.dispatch({'type': 'send', 'agent': 'zcode', 'cwd': self.temp.name, 'text': 'second'})
             await self.wait_for(lambda: not self.bridge.adapter.busy)
             self.assertTrue(any(e.get('text') == 'second' for e in self.events))
+            self.assertIs(self.bridge.adapter.process, process)
             self.assertFalse(any(e['type'] == 'error' for e in self.events))
 
     async def test_acp_and_claude_bidirectional_permissions(self):

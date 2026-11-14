@@ -72,14 +72,14 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNot(self.bridge.adapter.process, process)
         self.assertTrue(any(e.get('text') == previous + ':resumed' for e in self.events))
 
-    async def test_unsupported_reload_starts_a_new_session_with_notice(self):
+    async def test_unsupported_reload_does_not_silently_replace_a_session(self):
         with patch.dict(os.environ, {'FAKE_ACP_RELOAD': '0'}):
             await self.send('first')
             previous = self.bridge.adapter.session
             await self.bridge.dispatch({'type': 'cancel'})
             await self.send('again')
-            self.assertNotEqual(self.bridge.adapter.session, previous)
-            self.assertTrue(any(e.get('role') == 'notice' and 'new session' in e.get('text', '') for e in self.events))
+            self.assertEqual(self.bridge.adapter.session, previous)
+            self.assertTrue(any(e['type'] == 'error' and 'cannot resume' in e.get('text', '') for e in self.events))
 
     async def test_agent_and_workspace_changes_close_the_previous_process(self):
         await self.send('first')

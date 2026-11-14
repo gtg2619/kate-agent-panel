@@ -18,6 +18,7 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFrame>
+#include <QInputMethodEvent>
 #include <QJsonDocument>
 #include <QLineEdit>
 #include <QListWidget>
@@ -26,14 +27,18 @@
 #include <QPluginLoader>
 #include <QPushButton>
 #include <QSignalSpy>
+#include <QScrollBar>
 #include <QScopeGuard>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTimer>
+#include <QToolButton>
+#include <QTreeWidget>
 #include <QUuid>
 #include <QVBoxLayout>
 #include <QWebEnginePage>
 #include <QWebEngineView>
+#include <memory>
 
 // Kate owns the tool-view layout and automatically inserts child widgets.
 class KateToolViewHost : public QFrame
@@ -105,6 +110,7 @@ public Q_SLOTS:
 class PanelTest : public QObject
 {
     Q_OBJECT
+    std::unique_ptr<QTemporaryDir> m_state;
     QVariant evaluate(QWebEngineView *browser, const QString &script)
     {
         QVariant result;
@@ -133,6 +139,9 @@ class PanelTest : public QObject
 private Q_SLOTS:
     void init()
     {
+        m_state = std::make_unique<QTemporaryDir>();
+        qputenv("KATE_AGENT_STATE_HOME", m_state->path().toUtf8());
+        qputenv("KATE_AGENT_DISABLE_NATIVE_DISCOVERY", "1");
         qputenv("KATE_AGENT_PI_COMMAND", QByteArray("python3 ") + SOURCE_DIR + "/tests/fake_agent.py");
     }
 
@@ -378,7 +387,7 @@ private Q_SLOTS:
         QVERIFY(document->setText(lines.join(QLatin1Char('\n'))));
         host.view = document->createView(&editorParent, &mainWindow);
         AgentPanel panel(&mainWindow);
-        panel.resize(1100, 700); panel.show();
+        panel.resize(1100, 450); panel.show();
         panel.findChild<QLineEdit *>()->setText(workspace);
         auto pending = panel.findChild<QListWidget *>();
         QVERIFY(!pending->isVisible());
@@ -705,6 +714,185 @@ $also literal$
         QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(), original);
     }
 
+    void liveQuestionsAndResume()
+    {
+        const auto agent = qEnvironmentVariable("KATE_AGENT_LIVE_TEST");
+        if (agent.isEmpty()) QSKIP("Opt in with KATE_AGENT_LIVE_TEST=deepseek or zcode; consumes model quota.");
+        QVERIFY(agent == QLatin1String("deepseek") || agent == QLatin1String("zcode"));
+        QTemporaryDir temp;
+        const auto filename = temp.filePath(QStringLiteral("test.cpp"));
+        QFile file(filename); QVERIFY(file.open(QIODevice::WriteOnly)); file.write("// Live session test\n"); file.close();
+        Host host; KTextEditor::MainWindow mainWindow(&host); QWidget editorParent;
+        auto document = KTextEditor::Editor::instance()->createDocument(&editorParent);
+        QVERIFY(document->openUrl(QUrl::fromLocalFile(filename)));
+        host.view = document->createView(&editorParent, &mainWindow);
+        const auto marker = QStringLiteral("MEMORY_") + QUuid::createUuid().toString(QUuid::Id128);
+        auto send = [](AgentPanel &panel, const QString &text) {
+            auto input = panel.findChild<QPlainTextEdit *>(); input->setPlainText(text);
+            QTest::keyClick(input, Qt::Key_Return);
+        };
+        {
+            AgentPanel panel(&mainWindow); panel.resize(1000, 600); panel.show();
+            auto browser = panel.findChild<QWebEngineView *>();
+            auto agents = panel.findChild<QComboBox *>();
+            auto model = panel.findChild<QLineEdit *>(QStringLiteral("agentModelId"));
+            QVERIFY(waitForScript(browser, QStringLiteral("typeof nativePanel !== 'undefined'")));
+            QTRY_VERIFY(agents->count() >= 7 && model->isEnabled());
+            agents->setCurrentIndex(agents->findData(agent));
+            send(panel, QStringLiteral("Remember marker %1. Reply only with that marker. Do not use tools.").arg(marker));
+            QTRY_VERIFY_WITH_TIMEOUT(model->isEnabled(), 180000);
+            QTRY_VERIFY(evaluate(browser, QStringLiteral("document.querySelector('.assistant .body')?.textContent.includes('%1')").arg(marker)).toBool());
+            send(panel, QStringLiteral("Use your %1 tool to ask one single-choice question with options Alpha and Beta. Wait for my answer, then reply only with the chosen label. Do not use other tools or change files.")
+                .arg(agent == QLatin1String("zcode") ? QStringLiteral("AskUserQuestion") : QStringLiteral("ask_user_question")));
+            QTRY_VERIFY_WITH_TIMEOUT(evaluate(browser, QStringLiteral("[...document.querySelectorAll('.request .choice')].some(el => el.textContent.includes('Beta'))")).toBool(), 180000);
+            QVERIFY(!model->isEnabled());
+            evaluate(browser, QStringLiteral(R"JS(
+                [...document.querySelectorAll('.request .choice')].find(el => el.textContent.includes('Beta')).querySelector('input').click();
+                [...document.querySelectorAll('.request button')].find(el => el.textContent === 'Reply').click();
+            )JS"));
+            QTRY_VERIFY_WITH_TIMEOUT(model->isEnabled(), 180000);
+            QVERIFY(waitForScript(browser, QStringLiteral("[...document.querySelectorAll('.assistant .body')].at(-1)?.textContent.includes('Beta')")));
+            QVERIFY(evaluate(browser, QStringLiteral("document.querySelectorAll('.error').length === 0")).toBool());
+            QVERIFY(panel.grab().save(QStringLiteral(SOURCE_DIR "/build/live-%1-question-preview.png").arg(agent)));
+        }
+        AgentPanel restored(&mainWindow); restored.resize(1000, 600); restored.show();
+        auto browser = restored.findChild<QWebEngineView *>();
+        auto model = restored.findChild<QLineEdit *>(QStringLiteral("agentModelId"));
+        QTRY_VERIFY_WITH_TIMEOUT(evaluate(browser, QStringLiteral("document.querySelectorAll('.user').length === 2")).toBool(), 15000);
+        QCOMPARE(restored.findChild<QComboBox *>()->currentData().toString(), agent);
+        send(restored, QStringLiteral("What exact MEMORY_ marker did I give you? Reply only with that marker. Do not use tools."));
+        QTRY_VERIFY_WITH_TIMEOUT(model->isEnabled(), 180000);
+        QVERIFY(waitForScript(browser, QStringLiteral("[...document.querySelectorAll('.assistant .body')].at(-1)?.textContent.includes('%1')").arg(marker)));
+        QVERIFY(evaluate(browser, QStringLiteral("document.querySelectorAll('.error').length === 0")).toBool());
+    }
+
+    void composerKeysHeightAndModelFields()
+    {
+        Host host; KTextEditor::MainWindow mainWindow(&host);
+        AgentPanel panel(&mainWindow); panel.resize(900, 450); panel.show(); panel.activateWindow();
+        auto browser = panel.findChild<QWebEngineView *>();
+        auto input = panel.findChild<QPlainTextEdit *>(QStringLiteral("agentComposer"));
+        auto model = panel.findChild<QLineEdit *>(QStringLiteral("agentModelId"));
+        auto effort = panel.findChild<QLineEdit *>(QStringLiteral("agentReasoningEffort"));
+        QVERIFY(model); QVERIFY(effort); QVERIFY(!model->completer()); QVERIFY(!effort->completer());
+        QVERIFY(waitForScript(browser, QStringLiteral("typeof nativePanel !== 'undefined'")));
+        auto agents = panel.findChild<QComboBox *>();
+        QTRY_VERIFY(agents->count() >= 7 && model->isEnabled());
+        agents->setCurrentIndex(agents->findData(QStringLiteral("pi")));
+        model->setText(QStringLiteral("test-model")); effort->setText(QStringLiteral("high"));
+        input->setFocus(); QTRY_VERIFY(input->hasFocus());
+        const int single = input->height();
+        QCOMPARE(input->verticalScrollBar()->maximum(), 0);
+        QVERIFY(single < input->fontMetrics().lineSpacing() * 2 + 10);
+        QTest::keyClicks(input, "First line");
+        QTest::keyClick(input, Qt::Key_Return, Qt::ControlModifier);
+        QCOMPARE(input->toPlainText(), QStringLiteral("First line\n"));
+        QTRY_VERIFY(input->height() > single);
+        const int doubled = input->height();
+        QTest::keyClicks(input, "Second line");
+        QTest::keyClick(input, Qt::Key_Return, Qt::ControlModifier);
+        QTest::keyClicks(input, "Third line");
+        QCOMPARE(input->height(), doubled);
+        QCOMPARE(evaluate(browser, QStringLiteral("document.querySelectorAll('.user').length")).toInt(), 0);
+        QTest::keyClick(input, Qt::Key_Return);
+        QTRY_VERIFY(input->toPlainText().isEmpty());
+        QTRY_COMPARE(input->height(), single);
+        QVERIFY(waitForScript(browser, QStringLiteral("document.querySelector('.assistant .body')?.textContent.includes('Third line')")));
+        QTRY_VERIFY(model->isEnabled());
+        input->setPlainText(QString(1000, QLatin1Char('x')));
+        QTRY_COMPARE(input->height(), doubled);
+        input->clear(); QTRY_COMPARE(input->height(), single);
+        // An IME's Enter confirms preedit text; it must never submit a turn.
+        input->setPlainText(QStringLiteral("Draft"));
+        QInputMethodEvent preedit(QStringLiteral("composition"), {});
+        QApplication::sendEvent(input, &preedit);
+        QTest::keyClick(input, Qt::Key_Return);
+        QCOMPARE(evaluate(browser, QStringLiteral("document.querySelectorAll('.user').length")).toInt(), 1);
+        QInputMethodEvent commit; commit.setCommitString(QStringLiteral(" committed"));
+        QApplication::sendEvent(input, &commit);
+        QVERIFY(!input->toPlainText().isEmpty());
+    }
+
+    void localSessionsRestoreHistoryAndParameters()
+    {
+        Host host; KTextEditor::MainWindow mainWindow(&host);
+        {
+            AgentPanel panel(&mainWindow); panel.resize(900, 450); panel.show();
+            auto browser = panel.findChild<QWebEngineView *>();
+            auto agents = panel.findChild<QComboBox *>();
+            auto model = panel.findChild<QLineEdit *>(QStringLiteral("agentModelId"));
+            QVERIFY(waitForScript(browser, QStringLiteral("typeof nativePanel !== 'undefined'")));
+            QTRY_VERIFY(agents->count() >= 7 && model->isEnabled());
+            agents->setCurrentIndex(agents->findData(QStringLiteral("pi")));
+            model->setText(QStringLiteral("saved-model"));
+            panel.findChild<QLineEdit *>(QStringLiteral("agentReasoningEffort"))->setText(QStringLiteral("low"));
+            auto input = panel.findChild<QPlainTextEdit *>();
+            input->setPlainText(QStringLiteral("Remember this conversation"));
+            QTest::keyClick(input, Qt::Key_Return);
+            QVERIFY(waitForScript(browser, QStringLiteral("document.querySelector('.assistant .body')?.textContent.includes('Remember this conversation')")));
+            QTRY_VERIFY(model->isEnabled());
+        }
+        AgentPanel restored(&mainWindow); restored.resize(900, 450); restored.show();
+        auto browser = restored.findChild<QWebEngineView *>();
+        auto model = restored.findChild<QLineEdit *>(QStringLiteral("agentModelId"));
+        QTRY_COMPARE(model->text(), QStringLiteral("saved-model"));
+        QCOMPARE(restored.findChild<QLineEdit *>(QStringLiteral("agentReasoningEffort"))->text(), QStringLiteral("low"));
+        QCOMPARE(restored.findChild<QComboBox *>()->currentData().toString(), QStringLiteral("pi"));
+        QVERIFY(waitForScript(browser, QStringLiteral("document.querySelector('.assistant .body')?.textContent.includes('Remember this conversation') && document.querySelectorAll('.user').length === 1")));
+        auto input = restored.findChild<QPlainTextEdit *>(); input->setPlainText(QStringLiteral("Keep draft"));
+        auto sessions = restored.findChild<QToolButton *>(QStringLiteral("agentLocalSessions")); QVERIFY(sessions);
+        bool checked = false;
+        QTimer::singleShot(150, &restored, [&] {
+            auto dialog = restored.findChild<QDialog *>();
+            if (!dialog) return;
+            auto close = qScopeGuard([&] { dialog->reject(); });
+            auto view = dialog->findChild<QTreeWidget *>(QStringLiteral("agentSessionList"));
+            QVERIFY(view); QCOMPARE(view->headerItem()->text(0), QStringLiteral("CLI Tool"));
+            QTRY_COMPARE(view->topLevelItemCount(), 1);
+            QCOMPARE(view->topLevelItem(0)->text(0), QStringLiteral("Pi"));
+            QVERIFY(!view->topLevelItem(0)->isDisabled());
+            checked = true;
+        });
+        sessions->click(); QVERIFY(checked);
+        QCOMPARE(input->toPlainText(), QStringLiteral("Keep draft"));
+        QVERIFY(restored.grab().save(QStringLiteral(SOURCE_DIR "/build/session-preview.png")));
+    }
+
+    void choiceFormsValidationRetryAndErrors()
+    {
+        Host host; KTextEditor::MainWindow mainWindow(&host);
+        AgentPanel panel(&mainWindow); panel.resize(900, 600); panel.show();
+        auto browser = panel.findChild<QWebEngineView *>();
+        QVERIFY(waitForScript(browser, QStringLiteral("typeof nativePanel !== 'undefined'")));
+        evaluate(browser, QStringLiteral(R"JS(
+            nativePanel = {reply: (id,value) => { window.lastAnswer = {id, value:JSON.parse(value)}; }};
+            agentPanelReceive({type:'request',id:'choice',title:'Choose options',questions:[
+                {id:'one',question:'Pick one',required:true,allowOther:false,options:[{label:'First',value:'a'},{label:'Second',value:'b'}]},
+                {id:'many',question:'Pick several',required:true,multiSelect:true,options:[{label:'Alpha'},{label:'Beta'}]},
+                {id:'secret',question:'Secret answer',isSecret:true,required:true}
+            ]});
+            document.querySelector('.request button').click();
+        )JS"));
+        QVERIFY(evaluate(browser, QStringLiteral("!window.lastAnswer && !!document.querySelector('.request-error') && document.querySelectorAll('input:checked').length === 0")).toBool());
+        QVERIFY(evaluate(browser, QStringLiteral("document.querySelector('input[type=password]').autocomplete === 'off'")).toBool());
+        evaluate(browser, QStringLiteral(R"JS(
+            document.querySelector('input[type=radio]').click();
+            document.querySelectorAll('input[type=checkbox]').forEach(input => input.click());
+            document.querySelector('input[aria-label="Custom answer"]').value='Custom';
+            document.querySelector('input[type=password]').value='test-only';
+            document.querySelector('.request button').click();
+        )JS"));
+        QVERIFY(evaluate(browser, QStringLiteral("lastAnswer.value.one === 'a' && JSON.stringify(lastAnswer.value.many) === JSON.stringify(['Alpha','Beta','Custom']) && lastAnswer.value.secret === 'test-only'")).toBool());
+        QVERIFY(evaluate(browser, QStringLiteral("[...document.querySelectorAll('.request input,.request button')].every(el => el.disabled)")).toBool());
+        evaluate(browser, QStringLiteral("agentPanelReceive({type:'request_failed',id:'choice',text:'Retry the answer'})"));
+        QVERIFY(evaluate(browser, QStringLiteral("!document.querySelector('.request button').disabled && document.querySelector('.request-error').textContent === 'Retry the answer'")).toBool());
+        evaluate(browser, QStringLiteral("[...document.querySelectorAll('.request button')].find(el => el.textContent === 'Dismiss').click()"));
+        QVERIFY(evaluate(browser, QStringLiteral("lastAnswer.value._cancel === true")).toBool());
+        evaluate(browser, QStringLiteral("agentPanelReceive({type:'request_resolved',id:'choice'}); agentPanelReceive({type:'error',text:'Provider quota exhausted'});"));
+        QVERIFY(waitForScript(browser, QStringLiteral("document.querySelector('.error .body')?.textContent.includes('Provider quota exhausted')")));
+        QVERIFY(evaluate(browser, QStringLiteral("!document.querySelector('.error').closest('details') && document.querySelector('.request').classList.contains('resolved')")).toBool());
+    }
+
     void permissionsAndReloadPreserveDraft()
     {
         const auto previous = qgetenv("KATE_AGENT_KIMI_COMMAND");
@@ -722,7 +910,7 @@ $also literal$
         input->setFocus();
         QTRY_VERIFY(input->hasFocus());
         input->setPlainText(QStringLiteral("Permission round trip"));
-        QTest::keyClick(input, Qt::Key_Return, Qt::ControlModifier);
+        QTest::keyClick(input, Qt::Key_Return);
         QTRY_COMPARE(evaluate(browser, QStringLiteral("document.querySelectorAll('.user').length")).toInt(), 1);
         QTRY_VERIFY(evaluate(browser, QStringLiteral("!!document.querySelector('.request button')")).toBool());
         QVERIFY(evaluate(browser, QStringLiteral("!document.querySelector('.assistant')")).toBool());

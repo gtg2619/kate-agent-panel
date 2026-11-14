@@ -12,19 +12,25 @@ def emit(data): print(json.dumps(data, ensure_ascii=False), flush=True)
 
 def response(id, result): emit({'jsonrpc': '2.0', 'id': id, 'result': result})
 
-if mode == 'zcode':
-    prompt = sys.argv[sys.argv.index('--prompt') + 1]
-    if prompt == 'second':
-        assert sys.argv[sys.argv.index('--resume') + 1] == session
-    emit({'type': 'result', 'sessionId': session, 'response': prompt})
-    # A real one-shot CLI can still flush/persist its session after emitting the result.
-    time.sleep(.2)
-    sys.exit(0)
-
 for raw in sys.stdin:
     data = json.loads(raw)
     method = data.get('method')
-    if mode == 'codex':
+    if mode == 'zcode':
+        assert 'jsonrpc' not in data
+        assert isinstance(data['id'], str)
+        if method in ('session/create', 'session/resume'):
+            if method.endswith('resume'): assert data['params']['sessionId'] == session
+            response(data['id'], {'session': {'sessionId': session}, 'runtime': {'eventSeq': 0}})
+        elif method == 'session/subscribe':
+            assert data['params']['deliveryKind'] == 'desktop-continuous'
+            response(data['id'], {'events': []})
+        elif method == 'session/send':
+            assert data['params']['sessionId'] == session
+            response(data['id'], {'accepted': True})
+            emit({'method': 'session/event', 'params': {'sessionId': session, 'type': 'model.streaming', 'payload': {'kind': 'text_delta', 'delta': data['params']['content']}}})
+            time.sleep(.1)
+            emit({'method': 'session/event', 'params': {'sessionId': session, 'type': 'turn.completed', 'payload': {}}})
+    elif mode == 'codex':
         if method == 'initialize':
             assert data['params']['clientInfo']['name'] == 'kate_agent_panel'
             response(data['id'], {'userAgent': 'fake'})
@@ -40,7 +46,7 @@ for raw in sys.stdin:
     elif mode == 'acp':
         if method == 'initialize':
             assert data['params']['protocolVersion'] == 1
-            assert data['params']['clientCapabilities'] == {}
+            assert data['params']['clientCapabilities'] == {'elicitation': {'form': {}}}
             response(data['id'], {'protocolVersion': 1, 'agentCapabilities': {'loadSession': True}})
         elif method == 'session/new': response(data['id'], {'sessionId': session})
         elif method == 'session/prompt':

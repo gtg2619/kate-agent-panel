@@ -1,7 +1,7 @@
 #pragma once
 #include <QJsonObject>
 #include <QPointer>
-#include <QTemporaryFile>
+#include <QTemporaryDir>
 #include <QWidget>
 
 class QComboBox;
@@ -13,6 +13,7 @@ class QPushButton;
 class QProcess;
 class QToolButton;
 class QWebEngineView;
+class QTreeWidget;
 namespace KTextEditor { class MainWindow; class View; }
 
 class AgentPanel : public QWidget
@@ -34,21 +35,36 @@ public Q_SLOTS:
 
 protected:
     void changeEvent(QEvent *event) override;
+    bool eventFilter(QObject *object, QEvent *event) override;
 
 private:
     void send();
     void startBridge();
     void command(const QJsonObject &object);
     void event(const QJsonObject &object);
-    void resetSession();
+    void resetSession(bool forgetLast = false);
     void chooseWorkspace();
     void updateTheme();
     void updatePending();
+    void updateInputHeight();
+    void requestSessions(bool autoResume = false, bool refresh = false);
+    void showSessions();
+    void updateSessionsView();
     QString inferWorkspace() const;
     QString workspace() const;
     KTextEditor::MainWindow *m_window;
     QComboBox *m_agents;
     QLineEdit *m_workspace;
+    QLineEdit *m_model;
+    QLineEdit *m_effort;
+    QToolButton *m_sessions;
+    QPointer<QTreeWidget> m_sessionsView;
+    QList<QJsonObject> m_localSessions;
+    QString m_sessionsRequest;
+    QString m_selectedSession;
+    bool m_loadingSession = false;
+    bool m_discovered = false;
+    bool m_composing = false;
     QWebEngineView *m_transcript = nullptr;
     QWidget *m_pendingRow;
     QListWidget *m_pending;
@@ -59,7 +75,7 @@ private:
     QToolButton *m_new;
     QPushButton *m_restore;
     QProcess *m_process;
-    QTemporaryFile m_bridgeFile;
+    QTemporaryDir m_bridgeDirectory;
     QByteArray m_buffer;
     QList<QJsonObject> m_history;
     bool m_ready = false;

@@ -93,6 +93,7 @@ function answer(id, value, node) {
   if (!nativePanel) return;
   nativePanel.reply(id, JSON.stringify(value));
   for (const control of node.querySelectorAll("button,input,textarea,select")) control.disabled = true;
+  node.dataset.waiting = "true";
 }
 
 function request(event) {
@@ -102,18 +103,72 @@ function request(event) {
   if (event.questions?.length) {
     const fields = new Map();
     for (const question of event.questions) {
-      const label = document.createElement("label"); label.textContent = question.question;
-      const input = document.createElement("input"); input.type = question.isSecret ? "password" : "text";
+      const group = document.createElement("fieldset");
+      const title = document.createElement("legend"); title.textContent = question.question;
+      group.append(title);
+      if (question.detail) { const detail = document.createElement("p"); detail.textContent = question.detail; group.append(detail); }
+      const choices = [];
       if (question.options?.length) {
-        const list = document.createElement("datalist"); list.id = `choices-${event.id}-${fields.size}`;
-        for (const option of question.options) { const el = document.createElement("option"); el.value = option.label; el.textContent = option.description; list.append(el); }
-        input.setAttribute("list", list.id); node.append(list);
+        for (const option of question.options) {
+          const label = document.createElement("label"); label.className = "choice";
+          const input = document.createElement("input");
+          input.type = question.multiSelect ? "checkbox" : "radio";
+          input.name = `choice-${event.id}-${fields.size}`;
+          input._answer = Object.hasOwn(option, "value") ? option.value : option.label;
+          const text = document.createElement("span"); text.textContent = option.label;
+          if (option.description) { const detail = document.createElement("small"); detail.textContent = option.description; text.append(detail); }
+          label.append(input, text); group.append(label); choices.push(input);
+        }
       }
-      label.append(input); node.append(label); fields.set(question.id, input);
+      let input;
+      if (!choices.length || question.allowOther !== false) {
+        input = document.createElement("input");
+        input.type = question.isSecret ? "password" : ["number", "integer"].includes(question.valueType) ? "number" : "text";
+        if (question.valueType === "integer") input.step = "1";
+        if (question.valueType === "number") input.step = "any";
+        if (question.valueType === "boolean") {
+          input = document.createElement("select");
+          for (const [value, text] of [["", "Choose…"], ["true", "Yes"], ["false", "No"]]) {
+            const option = document.createElement("option"); option.value = value; option.textContent = text; input.append(option);
+          }
+        }
+        input.setAttribute("aria-label", choices.length ? "Custom answer" : question.question);
+        input.placeholder = choices.length ? "Custom answer" : "Answer";
+        input.autocomplete = "off";
+        input.oninput = () => { if (input.value && !question.multiSelect) for (const choice of choices) choice.checked = false; };
+        group.append(input);
+        for (const choice of choices) choice.onchange = () => { if (!question.multiSelect) input.value = ""; };
+      }
+      node.append(group);
+      fields.set(question.id, {question, choices, input});
     }
     const submit = document.createElement("button"); submit.textContent = "Reply";
-    submit.onclick = () => answer(event.id, Object.fromEntries([...fields].map(([id, input]) => [id, input.value])), node);
+    submit.onclick = () => {
+      const answers = {};
+      for (const [id, {question, choices, input}] of fields) {
+        let values = choices.filter(choice => choice.checked).map(choice => choice._answer);
+        if (input?.value.trim()) {
+          let value = input.value;
+          if (["number", "integer"].includes(question.valueType)) {
+            if (!input.reportValidity()) return;
+            value = Number(value);
+          } else if (question.valueType === "boolean") value = value === "true";
+          values = question.multiSelect ? [...values, value] : [value];
+        }
+        if (!values.length && question.required) {
+          (input || choices[0])?.focus();
+          let error = node.querySelector(".request-error");
+          if (!error) { error = document.createElement("p"); error.className = "request-error"; node.append(error); }
+          error.textContent = "Answer all required questions before replying.";
+          return;
+        }
+        answers[id] = question.multiSelect ? values : (values[0] ?? "");
+      }
+      answer(event.id, answers, node);
+    };
     node.append(submit);
+    const cancel = document.createElement("button"); cancel.textContent = "Dismiss";
+    cancel.onclick = () => answer(event.id, {_cancel: true}, node); node.append(cancel);
   } else if (event.options?.length) {
     for (const option of event.options) {
       const button = document.createElement("button"); button.textContent = option.label;
@@ -123,8 +178,11 @@ function request(event) {
     const input = document.createElement("textarea"); node.append(input);
     const button = document.createElement("button"); button.textContent = "Reply";
     button.onclick = () => answer(event.id, input.value, node); node.append(button);
+    const cancel = document.createElement("button"); cancel.textContent = "Dismiss";
+    cancel.onclick = () => answer(event.id, {_cancel: true}, node); node.append(cancel);
   }
   requests.set(event.id, node); conversation.append(node); empty.hidden = true;
+  if (followTail) node.scrollIntoView({block: "nearest"});
 }
 
 function receive(event) {
@@ -132,11 +190,21 @@ function receive(event) {
     conversation.replaceChildren(); entries.clear(); requests.clear(); dirty.clear(); empty.hidden = false;
     processGroup = null; turn = 0; followTail = true; window.scrollTo(0, 0);
   } else if (event.type === "message" || event.type === "tool") message(event);
-  else if (event.type === "error") message({...event, role: "notice", id: `error-${Date.now()}-${entries.size}`});
+  else if (event.type === "error") message({...event, role: "error", title: "Error", id: `error-${++sequence}`});
   else if (event.type === "request") request(event);
   else if (event.type === "request_resolved") {
     const node = requests.get(event.id);
     if (node) { node.classList.add("resolved"); for (const el of node.querySelectorAll("button,input,textarea,select")) el.disabled = true; }
+    requests.delete(event.id);
+  } else if (event.type === "request_failed") {
+    const node = requests.get(event.id);
+    if (node) {
+      for (const control of node.querySelectorAll("button,input,textarea,select")) control.disabled = false;
+      node.dataset.waiting = "false";
+      let error = node.querySelector(".request-error");
+      if (!error) { error = document.createElement("p"); error.className = "request-error"; node.append(error); }
+      error.textContent = event.text || "Reply failed. Try again.";
+    }
   } else if (event.type === "requests_cleared") {
     for (const node of requests.values()) node.remove(); requests.clear();
   } else if (event.type === "theme") {

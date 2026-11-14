@@ -41,7 +41,7 @@ elif mode == 'acp':
         data = json.loads(raw)
         method, params = data.get('method'), data.get('params', {})
         if method == 'initialize':
-            assert params['clientCapabilities'] == {}
+            assert params['clientCapabilities'] == {'elicitation': {'form': {}}}
             if os.environ.get('FAKE_ACP_BAD_RESULT') == '1':
                 emit({'id':data['id'], 'result':[]})
                 continue

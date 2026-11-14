@@ -6,12 +6,15 @@ Bring your agent CLIs into Kate's bottom panel, beside Terminal and Diagnostics.
 
 - A compact, left-aligned conversation using Kate's colors and fonts.
 - A fixed bottom composer, with reasoning, tool calls, and logs collapsed under **Process**.
+- Plain **Model ID** and **Reasoning effort** fields, without completion.
+- Workspace-matched **Local Sessions**, with CLI labels and automatic resume.
 - Editor selections and cursor lines staged in **Pending**, including unsaved edits.
 - Clickable workspace references and local Markdown/LaTeX rendering.
 - Adapters for Pi, Codex, Claude Code, Kimi Code, Hermes, DeepSeek Harness, and ZCode.
 
 The plugin discovers installed commands and inherits their environment. Agent
-installation, authentication, model selection, and configuration stay with each CLI.
+installation, authentication, and configuration stay with each CLI. Model overrides
+apply to the selected session; empty fields use the CLI's session or model defaults.
 
 ## Screenshot
 
@@ -27,7 +30,7 @@ inline and display math, and collapsed process output.
 - **Build:** a C++20 compiler, CMake 3.22+, Extra CMake Modules 6, Qt 6.5+
   development packages (Widgets, WebEngineWidgets, WebChannel), and KDE Frameworks 6
   development packages (CoreAddons, TextEditor, XmlGui, I18n).
-- **Tests:** Qt Test, Node.js 18+, `flock`, and a display server or Xvfb.
+- **Tests:** Qt Test, Node.js 22.15+ or 24+, `flock`, and a display server or Xvfb.
 
 Build against the Qt and KDE libraries used by your Kate installation. Local
 validation uses Linux; see [testing](docs/testing.md) for the verified environment.
@@ -91,7 +94,9 @@ To uninstall this user installation, remove
    `.kateproject` directory, falling back to the current file's directory.
 2. Add a selection or cursor line through the editor's **Agent Pending** context menu.
    Pending stores a snapshot; double-click an item to edit it.
-3. Send with **Ctrl+Enter**. You can prepare the next draft while a turn runs.
+3. Optionally enter a model ID and reasoning effort. Send with **Enter**; use
+   **Ctrl+Enter** for a new line. The composer grows from one to two visible lines.
+   You can prepare the next draft while a turn runs.
    **Stop** terminates this panel's agent process group. Failed sends can be restored.
 4. Click a file reference to open the file and select its lines. Permissions and
    agent questions require an explicit response.
@@ -102,7 +107,8 @@ To uninstall this user installation, remove
 | Hide panel and return to the editor | Esc (focus inside the panel) |
 | Stage selection | Ctrl+Alt+S |
 | Stage cursor line | Ctrl+Alt+L |
-| Send | Ctrl+Enter |
+| Send | Enter |
+| Insert a new line | Ctrl+Enter |
 | Copy workspace reference | Context menu; configurable in Kate |
 
 Hiding the panel preserves the conversation, draft, and Pending context. It does
@@ -115,23 +121,60 @@ link for paths containing spaces. HTTP(S) links open in the system browser.
 Markdown and KaTeX render locally. Math delimiters are `$...$`, `$$...$$`,
 `\(...\)`, and `\[...\]`; code stays literal. Full TeX documents are not supported.
 
+### Sessions and model parameters
+
+Open **Local Sessions** from the history button. The list shows the CLI tool,
+title, and update time for the current working directory, with symlinks resolved.
+Select a row and **Resume**, or use **New Chat** to start fresh. Startup restores
+the last selected session for that directory; on first use, it selects the newest
+available local session. Choosing New Chat prevents that automatic selection until
+another conversation is started or resumed.
+
+Restoration loads the panel's recent transcript and parameters first. The agent's
+conversation process starts when the next message is sent. Native sessions are discovered read-only;
+older versions or custom storage layouts may expose fewer sessions. Imported
+transcripts are available for Pi, Codex, Claude, and Hermes ACP sessions; other
+native imports start with an empty display while the CLI retains its context.
+
+The panel stores its index and recent transcript (up to 200 events / 8 MiB per
+session) in `$XDG_STATE_HOME/kate-agent-panel`, defaulting to
+`~/.local/state/kate-agent-panel`. `KATE_AGENT_STATE_HOME` overrides that directory.
+Each Kate window has its own running process; the session index is shared.
+
+Parameter values are validated by the CLI. For example, Codex accepts model IDs
+and effort names, Pi accepts `provider/model` and thinking levels, and Kimi's
+thinking values depend on the selected model. ZCode accepts an existing
+`provider-id/model-id`; DeepSeek Harness accepts a model ID or `provider/model`.
+An unavailable model or unsupported effort produces an error rather than being
+silently ignored. Switching CLI tools clears the parameter fields.
+
 ## Supported Agents
 
 | Agent | Transport | Notes |
 |---|---|---|
-| Pi | RPC | Persistent session, tools, extension questions |
+| Pi | RPC | Persistent session, tools, extension confirm/select/input/editor requests |
 | Codex | app-server | Streaming, permissions, user questions |
 | Claude Code | stream-json | Persistent session, permissions, questions |
-| Kimi Code | ACP v1 | Uses the CLI's own tools and configuration |
-| Hermes | ACP v1 | Same client capabilities as Kimi |
-| DeepSeek Harness | ACP v1 | Requires `profiles/acp/cordis.yml` under `DSH_HOME` or `~/.dsh` |
-| ZCode | stream-json | One process per turn; resumes by session ID; uses `build` mode |
+| Kimi Code | ACP v1 | Form questions, multiple choice, permissions, resume |
+| Hermes | ACP v1 | Permissions and saved ACP sessions; see compatibility limits below |
+| DeepSeek Harness | ACP v1 + native question bridge | Existing ACP profile; questions use a process-local helper |
+| ZCode | app-server | Persistent process, questions, permissions, resume; new sessions use `build` mode |
 
-ZCode's prompt transport cannot accept interactive approvals. ACP reload depends
-on the agent's advertised `loadSession` capability; the panel does not advertise
-client filesystem or terminal capabilities. Each Kate window has its own session.
-Changing the agent or working directory starts a new conversation; history is kept
-in memory. See [test coverage and compatibility limits](docs/testing.md).
+Questions appear as explicit choices, multiple selections, or text fields where
+supported. No answer is preselected or submitted automatically. Failed replies
+remain editable. Permissions are forwarded to the CLI only after a response.
+
+DeepSeek Harness requires `profiles/acp/cordis.yml` under `DSH_HOME` or `~/.dsh`,
+and Node.js 22.15+ or 24+. Its ACP frontend omits human questions, so a temporary
+module loads the installed native question tool and connects it to the panel.
+No installed package or profile is edited. ACP resume depends on the agent's
+advertised capabilities; client filesystem and terminal capabilities remain disabled.
+
+Hermes is covered by ACP fixtures, but has not been tested locally with a real
+installation. The reviewed upstream ACP adapter resumes ACP-origin sessions and
+does not expose a reasoning-effort setting or a `clarify` answer callback. Those
+features are not claimed as supported. See [test coverage](docs/testing.md) for
+verified versions and remaining limits.
 
 ## Configuration
 

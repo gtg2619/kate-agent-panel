@@ -24,6 +24,8 @@ body { margin: 0; background: var(--background); color: var(--foreground); font:
 .body > :first-child { margin-top: 0; }
 .body > :last-child { margin-bottom: 0; }
 .notice > header { color: var(--foreground); }
+.error > header, .request-error { color: var(--foreground); font-weight: 600; }
+.error { border-left: 2px solid var(--accent); }
 p { margin: 5px 0; }
 a { color: var(--accent); text-underline-offset: 2px; }
 code, pre { font-family: var(--fixed-font-family); font-size: 1em; }
@@ -47,6 +49,12 @@ summary:focus-visible, a:focus-visible, button:focus-visible { outline: 1px soli
 .request { padding: 6px 8px; border-bottom: 1px solid var(--border); }
 .request strong { display: block; margin-bottom: 6px; font-weight: 600; white-space: pre-wrap; }
 .request label { display: block; margin: 6px 0; }
+.request fieldset { border: 0; padding: 4px 0; margin: 0; min-width: 0; }
+.request legend { padding: 0; }
+.request .choice { display: flex; align-items: baseline; gap: 6px; }
+.request .choice input { width: auto; margin: 0; }
+.request .choice small { display: block; color: var(--muted); }
+.request select { font: inherit; color: var(--foreground); background: var(--background); }
 .request input, .request textarea { display: block; width: 100%; padding: 4px; margin-top: 4px; border: 1px solid var(--border); background: var(--background); color: var(--foreground); font: inherit; }
 .request button { margin: 4px 6px 0 0; padding: 3px 10px; border: 1px solid var(--border); background: var(--alternate); color: var(--foreground); font: inherit; cursor: pointer; }
 .request button:disabled, .resolved { opacity: .6; cursor: default; }

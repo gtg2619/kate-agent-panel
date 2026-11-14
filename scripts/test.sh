@@ -42,7 +42,7 @@ elif [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
 fi
 if [[ "$mode" == --live ]]; then
     export KATE_AGENT_LIVE_TEST="$2"
-    "${run[@]}" "$build_dir/bin/panel_test" liveConversation
+    "${run[@]}" "$build_dir/bin/panel_test" liveConversation liveQuestionsAndResume
 else
     "${run[@]}" ctest --test-dir "$build_dir" --output-on-failure --output-junit "$build_dir/test-results.xml"
 fi

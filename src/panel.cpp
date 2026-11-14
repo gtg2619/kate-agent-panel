@@ -10,6 +10,7 @@
 #include <QDesktopServices>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QDateTime>
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -18,9 +19,12 @@
 #include <QFontInfo>
 #include <QFontMetrics>
 #include <QHBoxLayout>
+#include <QHeaderView>
 #include <QJsonArray>
+#include <QInputMethodEvent>
 #include <QJsonDocument>
 #include <QLabel>
+#include <QKeyEvent>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QPlainTextEdit>
@@ -30,6 +34,10 @@
 #include <QStandardItemModel>
 #include <QStandardPaths>
 #include <QTimer>
+#include <QTextBlock>
+#include <QTextDocument>
+#include <QTextLayout>
+#include <QTreeWidget>
 #include <QToolButton>
 #include <QUuid>
 #include <QVBoxLayout>
@@ -89,6 +97,20 @@ AgentPanel::AgentPanel(KTextEditor::MainWindow *window, QWidget *parent)
     m_workspace->setAccessibleName(i18n("Working directory"));
     m_workspace->setToolTip(i18n("Working directory for this conversation"));
     toolbar->addWidget(m_workspace, 1);
+    m_model = new QLineEdit(this);
+    m_model->setObjectName(QStringLiteral("agentModelId"));
+    m_model->setAccessibleName(i18n("Model ID"));
+    m_model->setPlaceholderText(i18n("Model ID"));
+    m_model->setToolTip(i18n("Model ID for this session. Leave empty to use the CLI default."));
+    m_model->setMaximumWidth(190);
+    toolbar->addWidget(m_model);
+    m_effort = new QLineEdit(this);
+    m_effort->setObjectName(QStringLiteral("agentReasoningEffort"));
+    m_effort->setAccessibleName(i18n("Reasoning effort"));
+    m_effort->setPlaceholderText(i18n("Reasoning effort"));
+    m_effort->setToolTip(i18n("Reasoning effort for this session. Leave empty to use the CLI default."));
+    m_effort->setMaximumWidth(140);
+    toolbar->addWidget(m_effort);
     auto toolButton = [this](const QString &icon, const QString &label) {
         auto button = new QToolButton(this);
         button->setIcon(QIcon::fromTheme(icon));
@@ -103,6 +125,10 @@ AgentPanel::AgentPanel(KTextEditor::MainWindow *window, QWidget *parent)
     auto refresh = toolButton(QStringLiteral("view-refresh"), i18n("Refresh Agents"));
     refresh->setToolTip(i18n("Check executable paths and environment variable names"));
     toolbar->addWidget(refresh);
+    m_sessions = toolButton(QStringLiteral("view-history"), i18n("Local Sessions"));
+    m_sessions->setObjectName(QStringLiteral("agentLocalSessions"));
+    toolbar->addWidget(m_sessions);
+    connect(m_sessions, &QToolButton::clicked, this, &AgentPanel::showSessions);
     m_new = toolButton(QStringLiteral("document-new"), i18n("New Chat"));
     toolbar->addWidget(m_new);
     outer->addLayout(toolbar);
@@ -151,8 +177,12 @@ AgentPanel::AgentPanel(KTextEditor::MainWindow *window, QWidget *parent)
     m_input = new QPlainTextEdit(this);
     setFocusProxy(m_input);
     m_input->setAccessibleName(i18n("Message to agent"));
-    m_input->setPlaceholderText(i18n("Ask the agent…   Ctrl+Enter to send"));
-    m_input->setFixedHeight(QFontMetrics(m_input->font()).lineSpacing() * 3 + 8);
+    m_input->setPlaceholderText(i18n("Ask the agent…   Enter to send, Ctrl+Enter for a new line"));
+    m_input->setObjectName(QStringLiteral("agentComposer"));
+    m_input->installEventFilter(this);
+    connect(m_input->document(), &QTextDocument::contentsChanged, this, &AgentPanel::updateInputHeight);
+    connect(m_input, &QPlainTextEdit::updateRequest, this, [this] { updateInputHeight(); });
+    updateInputHeight();
     outer->addWidget(m_input);
     auto footer = new QHBoxLayout;
     m_status = new QLabel(i18n("Discovering agents…"), this);
@@ -204,18 +234,27 @@ AgentPanel::AgentPanel(KTextEditor::MainWindow *window, QWidget *parent)
         }
         m_restore->hide();
     });
-    auto sendShortcut = new QShortcut(QKeySequence(QStringLiteral("Ctrl+Return")), this);
-    sendShortcut->setContext(Qt::WidgetWithChildrenShortcut);
-    connect(sendShortcut, &QShortcut::activated, this, &AgentPanel::send);
     connect(m_stop, &QPushButton::clicked, this, [this] { command({{QStringLiteral("type"), QStringLiteral("cancel")}}); });
-    connect(m_new, &QToolButton::clicked, this, &AgentPanel::resetSession);
+    connect(m_new, &QToolButton::clicked, this, [this] { resetSession(true); });
     connect(m_workspace, &QLineEdit::textEdited, this, [this] { m_workspaceEdited = true; });
+    connect(m_workspace, &QLineEdit::editingFinished, this, [this] {
+        if (!m_busy && workspace() != m_sessionWorkspace) {
+            resetSession();
+            requestSessions(true);
+        }
+    });
     connect(m_window, &KTextEditor::MainWindow::viewChanged, this, [this] {
-        if (!m_hasConversation && !m_workspaceEdited && !m_pending->count()) m_workspace->setText(inferWorkspace());
+        if (!m_hasConversation && !m_workspaceEdited && !m_pending->count() && workspace() != inferWorkspace()) {
+            m_workspace->setText(inferWorkspace());
+            if (m_discovered) requestSessions(true);
+        }
     });
     connect(m_agents, &QComboBox::currentIndexChanged, this, [this] {
         const auto agent = m_agents->currentData().toString();
-        if (agent != m_lastAgent && m_hasConversation) resetSession();
+        if (agent != m_lastAgent) {
+            if (m_hasConversation) resetSession();
+            m_model->clear(); m_effort->clear();
+        }
         m_lastAgent = agent;
     });
     connect(m_process, &QProcess::readyReadStandardOutput, this, [this] {
@@ -269,19 +308,23 @@ AgentPanel::~AgentPanel()
 void AgentPanel::startBridge()
 {
     if (m_process->state() != QProcess::NotRunning) return;
-    if (!m_bridgeFile.isOpen()) {
-        QFile source(QStringLiteral(":/agentpanel/bridge/agent_bridge.py"));
-        if (!source.open(QIODevice::ReadOnly) || !m_bridgeFile.open()) {
+    if (!m_bridgeDirectory.isValid()) {
+        m_status->setText(i18n("Could not create the agent bridge directory"));
+        return;
+    }
+    for (const auto name : {QStringLiteral("agent_bridge.py"), QStringLiteral("session_store.py"), QStringLiteral("dsh_questions.mjs")}) {
+        QFile source(QStringLiteral(":/agentpanel/bridge/") + name);
+        QFile target(m_bridgeDirectory.filePath(name));
+        if (!source.open(QIODevice::ReadOnly) || !target.open(QIODevice::WriteOnly)) {
             m_status->setText(i18n("Could not prepare the agent bridge"));
             return;
         }
-        m_bridgeFile.write(source.readAll());
-        m_bridgeFile.flush();
+        target.write(source.readAll());
     }
     const auto python = QStandardPaths::findExecutable(QStringLiteral("python3"));
     if (python.isEmpty()) { m_status->setText(i18n("python3 is required")); return; }
     m_buffer.clear();
-    m_process->start(python, {QStringLiteral("-u"), m_bridgeFile.fileName()});
+    m_process->start(python, {QStringLiteral("-u"), m_bridgeDirectory.filePath(QStringLiteral("agent_bridge.py"))});
 }
 
 QString AgentPanel::inferWorkspace() const
@@ -308,6 +351,7 @@ void AgentPanel::chooseWorkspace()
         m_workspaceEdited = true;
         if (m_hasConversation) resetSession();
         m_workspace->setText(folder);
+        requestSessions(true);
     }
 }
 
@@ -322,7 +366,7 @@ void AgentPanel::command(const QJsonObject &object)
 
 void AgentPanel::send()
 {
-    if (m_busy || !m_send->isEnabled() || m_agents->currentData().toString().isEmpty()) return;
+    if (m_busy || m_loadingSession || !m_send->isEnabled() || m_agents->currentData().toString().isEmpty()) return;
     QString text = m_input->toPlainText();
     const QString displayText = text;
     QJsonArray attachments;
@@ -349,7 +393,9 @@ void AgentPanel::send()
     // Disable immediately, before the asynchronous bridge acknowledges the turn.
     event({{QStringLiteral("type"), QStringLiteral("status")}, {QStringLiteral("busy"), true}, {QStringLiteral("text"), i18n("Starting…")}});
     command({{QStringLiteral("type"), QStringLiteral("send")}, {QStringLiteral("agent"), m_agents->currentData().toString()},
-             {QStringLiteral("cwd"), workspace()}, {QStringLiteral("text"), text}});
+             {QStringLiteral("cwd"), workspace()}, {QStringLiteral("text"), text}, {QStringLiteral("displayText"), displayText},
+             {QStringLiteral("attachments"), attachments}, {QStringLiteral("model"), m_model->text().trimmed()},
+             {QStringLiteral("effort"), m_effort->text().trimmed()}});
     m_input->clear();
     m_pending->clear();
 }
@@ -390,17 +436,134 @@ void AgentPanel::copyReference(KTextEditor::View *view)
     QApplication::clipboard()->setText(workspaceReference(view->document()->url().toLocalFile(), workspace(), range.start().line(), last));
 }
 
-void AgentPanel::resetSession()
+void AgentPanel::resetSession(bool forgetLast)
 {
     if (m_busy) return;
-    command({{QStringLiteral("type"), QStringLiteral("reset")}});
+    m_sessionsRequest.clear();
+    m_loadingSession = false;
+    command({{QStringLiteral("type"), QStringLiteral("reset")}, {QStringLiteral("forgetLast"), forgetLast}, {QStringLiteral("cwd"), workspace()}});
     m_history.clear();
     m_hasConversation = false;
+    m_selectedSession.clear();
+    m_sessionWorkspace = workspace();
     m_restore->hide();
     m_lastDraft.clear();
     m_lastPending.clear();
-    m_sessionWorkspace.clear();
     if (m_ready) Q_EMIT transcriptEvent(QStringLiteral("{\"type\":\"clear\"}"));
+}
+
+bool AgentPanel::eventFilter(QObject *object, QEvent *event)
+{
+    if (object == m_input) {
+        if (event->type() == QEvent::InputMethod) m_composing = !static_cast<QInputMethodEvent *>(event)->preeditString().isEmpty();
+        if (event->type() == QEvent::Resize) QTimer::singleShot(0, this, &AgentPanel::updateInputHeight);
+        if (event->type() == QEvent::KeyPress && !m_composing) {
+            auto key = static_cast<QKeyEvent *>(event);
+            if (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter) {
+                const auto modifiers = key->modifiers() & ~Qt::KeypadModifier;
+                if (modifiers == Qt::ControlModifier) {
+                    m_input->insertPlainText(QStringLiteral("\n"));
+                    return true;
+                }
+                if (modifiers == Qt::NoModifier) {
+                    if (!key->isAutoRepeat()) send();
+                    return true;
+                }
+            }
+        }
+    }
+    return QWidget::eventFilter(object, event);
+}
+
+void AgentPanel::updateInputHeight()
+{
+    int lines = 0;
+    for (auto block = m_input->document()->begin(); block.isValid() && lines < 2; block = block.next())
+        lines += qMax(1, block.layout()->lineCount());
+    const QFontMetrics metrics(m_input->font());
+    const int height = qMax(metrics.height(), metrics.lineSpacing()) * qBound(1, lines, 2)
+        + qCeil(m_input->document()->documentMargin() * 2) + m_input->frameWidth() * 2 + 2;
+    if (m_input->height() != height) m_input->setFixedHeight(height);
+}
+
+void AgentPanel::requestSessions(bool autoResume, bool refresh)
+{
+    if (m_process->state() != QProcess::Running || !QFileInfo(workspace()).isDir()) return;
+    m_sessionsRequest = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    if (autoResume) {
+        m_loadingSession = true;
+        m_send->setEnabled(false);
+        m_model->setEnabled(false); m_effort->setEnabled(false); m_agents->setEnabled(false);
+        m_status->setText(i18n("Loading local sessions…"));
+    }
+    command({{QStringLiteral("type"), QStringLiteral("sessions")}, {QStringLiteral("cwd"), workspace()},
+        {QStringLiteral("requestId"), m_sessionsRequest}, {QStringLiteral("autoResume"), autoResume}, {QStringLiteral("refresh"), refresh}});
+}
+
+void AgentPanel::updateSessionsView()
+{
+    if (!m_sessionsView) return;
+    const auto selected = m_sessionsView->currentItem()
+        ? m_sessionsView->currentItem()->data(0, Qt::UserRole).toString() : m_selectedSession;
+    m_sessionsView->clear();
+    for (const auto &session : m_localSessions) {
+        const auto agent = session.value(QStringLiteral("agent")).toString();
+        const int agentIndex = m_agents->findData(agent);
+        auto item = new QTreeWidgetItem(m_sessionsView, {
+            agentIndex >= 0 ? m_agents->itemText(agentIndex) : agent,
+            session.value(QStringLiteral("title")).toString(),
+            QDateTime::fromSecsSinceEpoch(qint64(session.value(QStringLiteral("updated")).toDouble())).toLocalTime().toString(QStringLiteral("yyyy-MM-dd HH:mm"))});
+        item->setData(0, Qt::UserRole, session.value(QStringLiteral("id")).toString());
+        item->setToolTip(1, session.value(QStringLiteral("session")).toString());
+        if (agentIndex < 0 || !(m_agents->model()->flags(m_agents->model()->index(agentIndex, 0)) & Qt::ItemIsEnabled))
+            item->setDisabled(true);
+        if (session.value(QStringLiteral("id")).toString() == selected) m_sessionsView->setCurrentItem(item);
+    }
+}
+
+void AgentPanel::showSessions()
+{
+    if (m_busy) return;
+    QDialog dialog(this);
+    dialog.setWindowTitle(i18n("Local Sessions"));
+    dialog.resize(720, 380);
+    auto layout = new QVBoxLayout(&dialog);
+    auto directory = new QLabel(workspace(), &dialog);
+    directory->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    layout->addWidget(directory);
+    auto view = new QTreeWidget(&dialog);
+    view->setObjectName(QStringLiteral("agentSessionList"));
+    view->setHeaderLabels({i18n("CLI Tool"), i18n("Session"), i18n("Updated")});
+    view->setRootIsDecorated(false);
+    view->header()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    view->header()->setSectionResizeMode(1, QHeaderView::Stretch);
+    view->header()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    layout->addWidget(view);
+    auto buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    auto resume = buttons->addButton(i18n("Resume"), QDialogButtonBox::AcceptRole);
+    auto refresh = buttons->addButton(i18n("Refresh"), QDialogButtonBox::ActionRole);
+    resume->setEnabled(false);
+    layout->addWidget(buttons);
+    m_sessionsView = view;
+    connect(view, &QTreeWidget::itemSelectionChanged, &dialog, [view, resume] {
+        resume->setEnabled(view->currentItem() && !view->currentItem()->isDisabled());
+    });
+    updateSessionsView();
+    auto select = [this, view, &dialog] {
+        auto item = view->currentItem();
+        if (!item || item->isDisabled()) return;
+        m_loadingSession = true; m_send->setEnabled(false);
+        m_model->setEnabled(false); m_effort->setEnabled(false); m_agents->setEnabled(false);
+        command({{QStringLiteral("type"), QStringLiteral("resume")}, {QStringLiteral("cwd"), workspace()},
+            {QStringLiteral("id"), item->data(0, Qt::UserRole).toString()}, {QStringLiteral("requestId"), m_sessionsRequest}});
+        dialog.accept();
+    };
+    connect(resume, &QPushButton::clicked, &dialog, select);
+    connect(view, &QTreeWidget::itemDoubleClicked, &dialog, select);
+    connect(refresh, &QPushButton::clicked, this, [this] { requestSessions(false, true); });
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    requestSessions();
+    dialog.exec();
 }
 
 void AgentPanel::event(const QJsonObject &object)
@@ -431,19 +594,62 @@ void AgentPanel::event(const QJsonObject &object)
         m_agents->setToolTip(keys.isEmpty() ? i18n("Agents use their existing login or configuration.")
             : i18n("Detected environment variables:\n%1", keys.join(QLatin1Char('\n'))));
         if (!m_busy) m_status->setText(first >= 0 ? i18n("Ready") : i18n("No supported agent found"));
+        if (!m_discovered) {
+            m_discovered = true;
+            requestSessions(true);
+        }
+        return;
+    }
+    if (type == QLatin1String("sessions")) {
+        if (object.value(QStringLiteral("requestId")).toString() != m_sessionsRequest) return;
+        m_localSessions.clear();
+        for (const auto item : object.value(QStringLiteral("sessions")).toArray()) m_localSessions.append(item.toObject());
+        m_selectedSession = object.value(QStringLiteral("current")).toString();
+        updateSessionsView();
+        return;
+    }
+    if (type == QLatin1String("sessions_complete")) {
+        if (object.value(QStringLiteral("requestId")).toString() != m_sessionsRequest) return;
+        m_loadingSession = false;
+        event({{QStringLiteral("type"), QStringLiteral("status")}, {QStringLiteral("busy"), m_busy}, {QStringLiteral("text"), i18n("Ready")}});
+        return;
+    }
+    if (type == QLatin1String("resumed")) {
+        if (object.value(QStringLiteral("requestId")).toString() != m_sessionsRequest) return;
+        const QSignalBlocker blocker(m_agents);
+        m_agents->setCurrentIndex(m_agents->findData(object.value(QStringLiteral("agent")).toString()));
+        m_lastAgent = m_agents->currentData().toString();
+        m_model->setText(object.value(QStringLiteral("model")).toString());
+        m_effort->setText(object.value(QStringLiteral("effort")).toString());
+        m_selectedSession = object.value(QStringLiteral("id")).toString();
+        m_sessionWorkspace = workspace(); m_hasConversation = true; m_loadingSession = false;
+        m_history.clear();
+        if (m_ready) Q_EMIT transcriptEvent(QStringLiteral("{\"type\":\"clear\"}"));
+        for (const auto item : object.value(QStringLiteral("history")).toArray()) event(item.toObject());
+        m_status->setText(i18n("Resumed: %1", object.value(QStringLiteral("title")).toString()));
+        return;
+    }
+    if (type == QLatin1String("session")) {
         return;
     }
     if (type == QLatin1String("status")) {
         m_busy = object.value(QStringLiteral("busy")).toBool();
         m_status->setText(object.value(QStringLiteral("text")).toString());
-        m_send->setEnabled(!m_busy && m_agents->currentIndex() >= 0 && m_process->state() == QProcess::Running);
+        m_send->setEnabled(!m_busy && !m_loadingSession && m_agents->currentIndex() >= 0 && m_process->state() == QProcess::Running);
         m_stop->setEnabled(m_busy);
         m_stop->setVisible(m_busy);
         m_send->setVisible(!m_busy);
-        m_agents->setEnabled(!m_busy);
+        m_agents->setEnabled(!m_busy && !m_loadingSession);
         m_workspace->setEnabled(!m_busy);
         m_new->setEnabled(!m_busy);
+        m_sessions->setEnabled(!m_busy);
+        m_model->setEnabled(!m_busy && !m_loadingSession);
+        m_effort->setEnabled(!m_busy && !m_loadingSession);
         return;
+    }
+    if (type == QLatin1String("error") && (object.value(QStringLiteral("operation")) == QLatin1String("sessions") || object.value(QStringLiteral("operation")) == QLatin1String("resume"))) {
+        m_loadingSession = false;
+        event({{QStringLiteral("type"), QStringLiteral("status")}, {QStringLiteral("busy"), m_busy}, {QStringLiteral("text"), i18n("Ready")}});
     }
     if (type == QLatin1String("error") && (!m_lastDraft.isEmpty() || !m_lastPending.isEmpty())) m_restore->show();
     if (type == QLatin1String("message") || type == QLatin1String("tool")) {
@@ -499,7 +705,7 @@ void AgentPanel::updateTheme()
     const auto palette = this->palette();
     m_transcript->page()->setBackgroundColor(palette.color(QPalette::Base));
     if (!m_ready) return;
-    m_input->setFixedHeight(QFontMetrics(m_input->font()).lineSpacing() * 3 + 8);
+    updateInputHeight();
     updatePending();
     Q_EMIT transcriptEvent(QString::fromUtf8(QJsonDocument(QJsonObject{
         {QStringLiteral("type"), QStringLiteral("theme")}, {QStringLiteral("background"), palette.color(QPalette::Base).name()},
