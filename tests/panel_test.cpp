@@ -513,8 +513,9 @@ private Q_SLOTS:
         auto send = panel.findChild<QToolButton *>(QStringLiteral("agentSubmit"));
         QVERIFY(send); QTRY_VERIFY_WITH_TIMEOUT(send->isEnabled(), 5000);
         QTest::mouseClick(send, Qt::LeftButton);
+        // The click may queue a send while native configuration is still loading.
+        QTRY_COMPARE_WITH_TIMEOUT(pending->count(), 0, 10000);
         QTRY_COMPARE_WITH_TIMEOUT(send->text(), QStringLiteral("Send"), 10000);
-        QCOMPARE(pending->count(), 0);
         QVERIFY(!pending->isVisible());
         bool rendered = false;
         QTRY_VERIFY_WITH_TIMEOUT(([&] {
@@ -995,6 +996,35 @@ $also literal$
         input->setPlainText(QStringLiteral("hello")); QTest::keyClick(input, Qt::Key_Return);
         QVERIFY(waitForScript(browser, QStringLiteral("document.querySelectorAll('.turn-summary').length === 2 && [...document.querySelectorAll('.turn-summary')].at(-1).textContent.includes('Completed in')")));
         QVERIFY(panel.grab().save(QStringLiteral(SOURCE_DIR "/build/configuration-preview.png")));
+    }
+
+    void queuedSendWaitsForConfiguration()
+    {
+        const auto gate = m_state->filePath(QStringLiteral("prepare-ready"));
+        qputenv("KATE_AGENT_PI_COMMAND", QByteArray("python3 ") + SOURCE_DIR + "/tests/fake_agent.py --prepare-gate " + gate.toUtf8());
+        Host host; KTextEditor::MainWindow mainWindow(&host);
+        QWidget editorParent;
+        auto document = KTextEditor::Editor::instance()->createDocument(&editorParent);
+        QVERIFY(document->setText(QStringLiteral("Unsaved context")));
+        host.view = document->createView(&editorParent, &mainWindow);
+        AgentPanel panel(&mainWindow); panel.resize(900, 400); panel.show();
+        auto input = panel.findChild<QPlainTextEdit *>();
+        auto pending = panel.findChild<QListWidget *>();
+        auto submit = panel.findChild<QToolButton *>(QStringLiteral("agentSubmit"));
+        auto model = panel.findChild<QLineEdit *>(QStringLiteral("agentModelId"));
+        auto browser = panel.findChild<QWebEngineView *>();
+        panel.addContext(host.view, false);
+        QTRY_VERIFY(submit->isEnabled() && !model->isEnabled());
+        input->setPlainText(QStringLiteral("Queued draft"));
+        submit->click(); submit->click();
+        QCOMPARE(input->toPlainText(), QStringLiteral("Queued draft"));
+        QCOMPARE(pending->count(), 1);
+        QFile ready(gate); QVERIFY(ready.open(QIODevice::WriteOnly)); ready.close();
+        QTRY_COMPARE(pending->count(), 0);
+        QTRY_VERIFY(input->toPlainText().isEmpty());
+        QVERIFY(waitForScript(browser, QStringLiteral("document.querySelectorAll('.user').length === 1 && document.querySelectorAll('.assistant').length === 1 && !!document.querySelector('.turn-summary')")));
+        QTRY_COMPARE(evaluate(browser, QStringLiteral("document.querySelector('.user .body').textContent")).toString().trimmed(), QStringLiteral("Queued draft"));
+        QVERIFY(evaluate(browser, QStringLiteral("document.querySelector('.attachment').textContent.includes('Unsaved context')")).toBool());
     }
 
     void localSessionsRestoreHistoryAndParameters()

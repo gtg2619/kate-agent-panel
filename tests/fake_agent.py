@@ -30,6 +30,12 @@ def emit(data):
 for raw in sys.stdin.buffer:
     request = json.loads(raw)
     if request.get('type') == 'get_state':
+        gate = argument('--prepare-gate', '')
+        if gate:
+            deadline = time.monotonic() + 10
+            while not Path(gate).exists():
+                if time.monotonic() > deadline: sys.exit('Preparation gate timed out')
+                time.sleep(.01)
         emit({'type': 'response', 'id': request.get('id'), 'command': 'get_state', 'success': True,
               'data': {'sessionFile': 'fake-session', 'model': {'id': model}, 'thinkingLevel': effort}})
     elif request.get('type') in ('get_available_models', 'set_model', 'set_thinking_level'):

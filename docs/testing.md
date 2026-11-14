@@ -18,7 +18,7 @@ commands with fixtures, including when real CLIs are installed on the host.
 Local validation uses Fedora 45, Qt 6.11.2, and KF6 6.31. The CI matrix covers
 Python/Node pairs 3.10/22.15, 3.13/24, and 3.14/26, plus the Fedora 43 native suite.
 The current offline run passes all five CTest suites, including 91 Python tests
-and 31 Qt test cases; the two real-provider Qt cases are opt-in. Other platforms
+and 32 Qt test cases; the two real-provider Qt cases are opt-in. Other platforms
 remain unverified.
 
 ## Coverage
@@ -28,7 +28,7 @@ remain unverified.
 | Discovery | DSH priority, unavailable-agent fallback, resume precedence, command overrides, argv quoting, malformed overrides, numeric NVM ordering, inherited PATH priority, isolated environments, credential-name-only inventory, existing Harness profile requirement |
 | Transport | Fragmented UTF-8, noisy stdout, oversized records, malformed input, EOF cleanup, busy sends, process-group termination and kill escalation |
 | Sessions | All seven adapters; persistent turns; canonical workspace filtering; read-only metadata imports; cache restart; New Chat; unavailable agents; stale discovery; ACP capability-dependent resume; UTF-8 history limits |
-| Parameters | Native default readback, idle model/effort edits, rejected-value recovery, native changes overriding cached settings, session persistence, ACP updates and legacy model IDs, Codex empty-thread recreation, ZCode model-default reasoning |
+| Parameters | Native default readback, queued sends during blocked preparation, idle model/effort edits, rejected-value recovery, native changes overriding cached settings, session persistence, ACP updates and legacy model IDs, Codex empty-thread recreation, ZCode model-default reasoning |
 | Interaction | Single/multiple/custom/secret answers, required fields, typed values, dismiss, failed-write retry, permissions, Codex MCP elicitation, server-resolved requests, DSH socket/hook lifecycle, special-character helper paths, existing Node preloads |
 | Native editor | Deferred startup, hidden/visible session restore, host palette/layout preservation, load/unload, resize/hide/show, icon fallbacks, shortcuts, split-view context, Pending, failure recovery, file-link clicks |
 | Focus | First-click composer focus, Esc from composer/transcript/workspace/Pending, dialog dismissal, return to editor, draft/context retention, focus on reopening |
