@@ -1,0 +1,13 @@
+<!DOCTYPE gui SYSTEM "kpartgui.dtd">
+<gui name="kateagentpanel" version="1">
+  <MenuBar>
+    <Menu name="tools"><text>&amp;Tools</text>
+      <Menu name="agent_panel"><text>Agent Panel</text>
+        <Action name="agent_panel_show"/>
+        <Action name="agent_pending_selection"/>
+        <Action name="agent_pending_cursor"/>
+        <Action name="agent_copy_reference"/>
+      </Menu>
+    </Menu>
+  </MenuBar>
+</gui>

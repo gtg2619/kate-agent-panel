@@ -1,0 +1,44 @@
+name: Tests
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.10', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: ./scripts/test.sh --unit
+  native:
+    runs-on: ubuntu-latest
+    container: fedora:43
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build and test dependencies
+        run: >-
+          dnf install -y gcc-c++ cmake ninja-build extra-cmake-modules
+          qt6-qtbase-devel qt6-qtwebengine-devel qt6-qtwebchannel-devel
+          kf6-ktexteditor-devel kf6-kcoreaddons-devel kf6-kxmlgui-devel kf6-ki18n-devel
+          python3 nodejs xorg-x11-server-Xvfb xorg-x11-xauth util-linux shadow-utils
+          dejavu-sans-fonts google-noto-sans-cjk-fonts
+      - name: Run native suite as an unprivileged user
+        run: |
+          useradd -m tester
+          chown -R tester:tester "$GITHUB_WORKSPACE"
+          runuser -u tester -- ./scripts/test.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-test-results
+          path: |
+            build/test-results.xml
+            build/Testing/Temporary/LastTest.log
+            build/*preview.png
