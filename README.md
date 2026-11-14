@@ -99,10 +99,14 @@ To uninstall this user installation, remove
 | Action | Shortcut |
 |---|---|
 | Show panel | Ctrl+Alt+A |
+| Hide panel and return to the editor | Esc (focus inside the panel) |
 | Stage selection | Ctrl+Alt+S |
 | Stage cursor line | Ctrl+Alt+L |
 | Send | Ctrl+Enter |
 | Copy workspace reference | Context menu; configurable in Kate |
+
+Hiding the panel preserves the conversation, draft, and Pending context. It does
+not stop a running agent; use **Stop** for that.
 
 References use `project/path/to/file:L123-234`, with one-based line numbers. Single
 lines, `file.cpp:12:3`, and `file:///...#L12-L30` also work. Use backticks or a Markdown

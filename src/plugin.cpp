@@ -9,9 +9,12 @@
 #include <KXMLGUIFactory>
 #include <QAction>
 #include <QApplication>
+#include <QEvent>
 #include <QIcon>
 #include <QMenu>
+#include <QShortcut>
 #include <QStyle>
+#include <QTimer>
 #include <QVBoxLayout>
 
 class AgentPluginView : public QObject, public KXMLGUIClient
@@ -26,14 +29,14 @@ public:
         m_tool = window->createToolView(plugin, QStringLiteral("kate_agent_panel"),
             KTextEditor::MainWindow::Bottom, agentIcon, i18n("Agent"));
         if (!m_tool) return;
-        // Kate owns this layout and may automatically insert child widgets.
-        auto layout = m_tool->layout();
-        if (!layout) {
-            layout = new QVBoxLayout(m_tool);
-            layout->setContentsMargins(0, 0, 0, 0);
-        }
-        m_panel = new AgentPanel(window, m_tool);
-        if (layout->indexOf(m_panel) < 0) layout->addWidget(m_panel);
+        m_tool->installEventFilter(this);
+        if (m_tool->isVisible()) schedulePanel();
+        auto escape = new QShortcut(QKeySequence(Qt::Key_Escape), m_tool);
+        escape->setContext(Qt::WidgetWithChildrenShortcut);
+        connect(escape, &QShortcut::activated, this, [this] {
+            m_window->hideToolView(m_tool);
+            if (auto view = m_window->activeView()) view->setFocus();
+        });
         setComponentName(QStringLiteral("kateagentpanel"), i18n("Agent Panel"));
         setXMLFile(QStringLiteral(":/agentpanel/ui.rc"));
 
@@ -41,7 +44,10 @@ public:
         show->setIcon(agentIcon);
         show->setText(i18n("Show Agent Panel"));
         KActionCollection::setDefaultShortcut(show, QKeySequence(QStringLiteral("Ctrl+Alt+A")));
-        connect(show, &QAction::triggered, this, [this] { m_window->showToolView(m_tool); });
+        connect(show, &QAction::triggered, this, [this] {
+            m_window->showToolView(m_tool);
+            ensurePanel()->setFocus();
+        });
         auto selection = actionCollection()->addAction(QStringLiteral("agent_pending_selection"));
         selection->setText(i18n("Add Selection to Agent Pending"));
         KActionCollection::setDefaultShortcut(selection, QKeySequence(QStringLiteral("Ctrl+Alt+S")));
@@ -52,7 +58,7 @@ public:
         connect(cursor, &QAction::triggered, this, [this] { stage(m_window->activeView(), false); });
         auto copy = actionCollection()->addAction(QStringLiteral("agent_copy_reference"));
         copy->setText(i18n("Copy Workspace Code Reference"));
-        connect(copy, &QAction::triggered, this, [this] { if (m_panel) m_panel->copyReference(m_window->activeView()); });
+        connect(copy, &QAction::triggered, this, [this] { ensurePanel()->copyReference(m_window->activeView()); });
         if (window->guiFactory()) window->guiFactory()->addClient(this);
         for (auto view : window->views()) hookView(view);
         connect(window, &KTextEditor::MainWindow::viewCreated, this, &AgentPluginView::hookView);
@@ -67,10 +73,36 @@ public:
     }
 
 private:
+    bool eventFilter(QObject *object, QEvent *event) override
+    {
+        if (object == m_tool && event->type() == QEvent::Show && !m_panel) schedulePanel();
+        return QObject::eventFilter(object, event);
+    }
+    void schedulePanel()
+    {
+        // Session restoration can show tools while Kate is still constructing its
+        // window. Leave that stack before initializing WebEngine and the bridge.
+        QTimer::singleShot(0, this, [this] {
+            if (m_tool && m_tool->isVisible()) ensurePanel();
+        });
+    }
+    AgentPanel *ensurePanel()
+    {
+        if (m_panel) return m_panel;
+        // Kate owns this layout and may automatically insert child widgets.
+        auto layout = m_tool->layout();
+        if (!layout) {
+            layout = new QVBoxLayout(m_tool);
+            layout->setContentsMargins(0, 0, 0, 0);
+        }
+        m_panel = new AgentPanel(m_window, m_tool);
+        if (layout->indexOf(m_panel) < 0) layout->addWidget(m_panel);
+        return m_panel;
+    }
     void stage(KTextEditor::View *view, bool selection)
     {
-        if (!m_panel || !view) return;
-        m_panel->addContext(view, selection);
+        if (!view) return;
+        ensurePanel()->addContext(view, selection);
         m_window->showToolView(m_tool);
     }
     void hookView(KTextEditor::View *view)
@@ -93,7 +125,7 @@ private:
                 auto cursor = submenu->addAction(i18n("Add Cursor Context"));
                 connect(cursor, &QAction::triggered, this, [this, safeView] { stage(safeView, false); });
                 auto copy = submenu->addAction(i18n("Copy Workspace Code Reference"));
-                connect(copy, &QAction::triggered, this, [this, safeView] { if (m_panel) m_panel->copyReference(safeView); });
+                connect(copy, &QAction::triggered, this, [this, safeView] { if (safeView) ensurePanel()->copyReference(safeView); });
             });
     }
     KTextEditor::MainWindow *m_window;

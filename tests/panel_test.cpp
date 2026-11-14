@@ -12,6 +12,7 @@
 #include <QChildEvent>
 #include <QClipboard>
 #include <QComboBox>
+#include <QDialog>
 #include <QDir>
 #include <QEventLoop>
 #include <QElapsedTimer>
@@ -65,6 +66,8 @@ public:
     QUrl opened;
     QPointer<QWidget> tool;
     QPointer<QWidget> shown;
+    QWidget *toolParent = nullptr;
+    int hideCount = 0;
     bool managedLayout = true;
     QPointer<QLayout> toolLayout;
     QIcon toolIcon;
@@ -80,7 +83,8 @@ public Q_SLOTS:
     QWidget *window() { return view ? view->window() : nullptr; }
     QWidget *createViewBar(KTextEditor::View *) { return nullptr; }
     void deleteViewBar(KTextEditor::View *) {}
-    bool showToolView(QWidget *widget) { shown = widget; return true; }
+    bool showToolView(QWidget *widget) { shown = widget; widget->show(); return true; }
+    bool hideToolView(QWidget *widget) { ++hideCount; widget->hide(); shown = nullptr; return true; }
     KXMLGUIFactory *guiFactory() { return nullptr; }
     QList<KTextEditor::View *> views() { return view ? QList<KTextEditor::View *>{view} : QList<KTextEditor::View *>{}; }
     QWidget *createToolView(KTextEditor::Plugin *, const QString &, KTextEditor::MainWindow::ToolViewPosition position, const QIcon &icon, const QString &)
@@ -88,6 +92,11 @@ public Q_SLOTS:
         toolPosition = position;
         toolIcon = icon;
         tool = managedLayout ? new KateToolViewHost : new QWidget;
+        if (toolParent) {
+            tool->setParent(toolParent);
+            toolParent->layout()->addWidget(tool);
+            tool->hide();
+        }
         toolLayout = tool->layout();
         return tool;
     }
@@ -148,14 +157,15 @@ private Q_SLOTS:
         auto pluginView = plugin->createView(&mainWindow);
         QVERIFY(pluginView); QVERIFY(host.tool);
         QCOMPARE(host.toolPosition, KTextEditor::MainWindow::Bottom);
+        host.tool->resize(900, 350);
+        host.tool->show();
+        QVERIFY(QTest::qWaitForWindowExposed(host.tool));
+        QTRY_VERIFY(host.tool->findChild<QWidget *>(QStringLiteral("kateAgentPanel")));
         auto panel = host.tool->findChild<QWidget *>(QStringLiteral("kateAgentPanel"));
         QVERIFY(panel);
         QVERIFY(host.tool->layout());
         if (managedLayout) QCOMPARE(host.tool->layout(), host.toolLayout.data());
         QVERIFY2(host.tool->layout()->indexOf(panel) >= 0, "The panel must remain in Kate's installed layout");
-        host.tool->resize(900, 350);
-        host.tool->show();
-        QVERIFY(QTest::qWaitForWindowExposed(host.tool));
         for (const QSize size : {QSize(900, 350), QSize(1200, 550), QSize(700, 260)}) {
             host.tool->resize(size);
             QTRY_COMPARE(panel->geometry(), host.tool->contentsRect());
@@ -172,6 +182,129 @@ private Q_SLOTS:
         delete pluginView;
         QVERIFY(!host.tool);
         delete plugin;
+    }
+
+    void startupKeepsHostUntouchedUntilPanelIsShown_data()
+    {
+        QTest::addColumn<bool>("restoredVisible");
+        QTest::newRow("hidden") << false;
+        QTest::newRow("restored-visible") << true;
+    }
+
+    void startupKeepsHostUntouchedUntilPanelIsShown()
+    {
+        QFETCH(bool, restoredVisible);
+        QWidget window;
+        auto layout = new QVBoxLayout(&window);
+        auto sidebar = new QPushButton(QStringLiteral("Sidebar control"), &window);
+        layout->addWidget(sidebar);
+        Host host; host.toolParent = &window;
+        KTextEditor::MainWindow mainWindow(&host);
+        QPluginLoader loader(QStringLiteral(PLUGIN_FILE));
+        auto factory = qobject_cast<KPluginFactory *>(loader.instance()); QVERIFY(factory);
+        auto plugin = factory->create<KTextEditor::Plugin>(&host); QVERIFY(plugin);
+        const auto applicationPalette = QApplication::palette();
+        auto pluginView = plugin->createView(&mainWindow);
+        auto cleanup = qScopeGuard([&] { delete pluginView; delete plugin; });
+        QVERIFY(host.tool);
+        QVERIFY2(!host.tool->findChild<QWebEngineView *>(), "Loading a hidden plugin must not initialize WebEngine during Kate startup");
+        QVERIFY(!window.windowHandle());
+        QTest::qWait(25);
+        QVERIFY(!host.tool->findChild<QWebEngineView *>());
+        if (restoredVisible) host.showToolView(host.tool);
+        auto dark = window.palette();
+        dark.setColor(QPalette::Window, QColor(QStringLiteral("#31363b")));
+        dark.setColor(QPalette::Base, QColor(QStringLiteral("#232629")));
+        dark.setColor(QPalette::Text, QColor(QStringLiteral("#eff0f1")));
+        dark.setColor(QPalette::WindowText, QColor(QStringLiteral("#eff0f1")));
+        window.setPalette(dark);
+        window.resize(900, 450); window.show();
+        if (!restoredVisible) {
+            QVERIFY(QTest::qWaitForWindowExposed(&window));
+            QVERIFY(!host.tool->findChild<QWebEngineView *>());
+            host.showToolView(host.tool);
+        }
+        // Session restoration may show the tool before Kate finishes applying its theme.
+        QVERIFY(!host.tool->findChild<QWebEngineView *>());
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QTRY_VERIFY(host.tool->findChild<QWebEngineView *>());
+        auto browser = host.tool->findChild<QWebEngineView *>();
+        QVERIFY(waitForScript(browser, QStringLiteral("getComputedStyle(document.body).backgroundColor === 'rgb(35, 38, 41)'")));
+        QCOMPARE(QApplication::palette(), applicationPalette);
+        QCOMPARE(window.palette(), dark);
+        QVERIFY(sidebar->isVisible());
+        QVERIFY(window.rect().contains(sidebar->geometry()));
+        QVERIFY(!sidebar->geometry().intersects(host.tool->geometry()));
+        QSignalSpy clicked(sidebar, &QPushButton::clicked);
+        QTest::mouseClick(sidebar, Qt::LeftButton);
+        QCOMPARE(clicked.count(), 1);
+    }
+
+    void escapeClosesPanelAndPreservesState_data()
+    {
+        QTest::addColumn<QString>("focusTarget");
+        for (const auto name : {"composer", "transcript", "workspace", "pending"})
+            QTest::newRow(name) << QString::fromLatin1(name);
+    }
+
+    void escapeClosesPanelAndPreservesState()
+    {
+        QFETCH(QString, focusTarget);
+        Host host;
+        KTextEditor::MainWindow mainWindow(&host);
+        QWidget window; auto layout = new QVBoxLayout(&window);
+        host.toolParent = &window;
+        auto document = KTextEditor::Editor::instance()->createDocument(&window);
+        QVERIFY(document->setText(QStringLiteral("Keep this editor context")));
+        host.view = document->createView(&window, &mainWindow);
+        layout->addWidget(host.view);
+        QPluginLoader loader(QStringLiteral(PLUGIN_FILE));
+        auto factory = qobject_cast<KPluginFactory *>(loader.instance()); QVERIFY(factory);
+        auto plugin = factory->create<KTextEditor::Plugin>(&host); QVERIFY(plugin);
+        auto pluginView = plugin->createView(&mainWindow);
+        auto cleanup = qScopeGuard([&] { delete pluginView; delete plugin; });
+        auto client = dynamic_cast<KXMLGUIClient *>(pluginView); QVERIFY(client);
+        window.resize(900, 700); window.show(); window.activateWindow();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        client->actionCollection()->action(QStringLiteral("agent_pending_cursor"))->trigger();
+        QTRY_VERIFY(host.tool->findChild<QWebEngineView *>());
+        auto browser = host.tool->findChild<QWebEngineView *>();
+        auto input = host.tool->findChild<QPlainTextEdit *>();
+        auto pending = host.tool->findChild<QListWidget *>();
+        QVERIFY(input); QVERIFY(pending);
+        QVERIFY(waitForScript(browser, QStringLiteral("typeof agentPanelReceive === 'function'")));
+        input->setPlainText(QStringLiteral("Keep this draft"));
+        // Escape in an owned dialog must dismiss the dialog, leaving the panel open.
+        if (focusTarget == QLatin1String("composer")) {
+            QDialog dialog(host.tool);
+            dialog.setModal(true);
+            dialog.show(); dialog.activateWindow();
+            QVERIFY(QTest::qWaitForWindowActive(&dialog));
+            QTest::keyClick(&dialog, Qt::Key_Escape);
+            QTRY_VERIFY(!dialog.isVisible());
+            QCOMPARE(host.hideCount, 0);
+            QVERIFY(host.tool->isVisible());
+        }
+        QWidget *target = input;
+        if (focusTarget == QLatin1String("transcript")) target = browser;
+        else if (focusTarget == QLatin1String("workspace")) target = host.tool->findChild<QLineEdit *>();
+        else if (focusTarget == QLatin1String("pending")) target = pending;
+        QVERIFY(target);
+        QVERIFY(target->isVisible());
+        window.activateWindow();
+        QVERIFY(QTest::qWaitForWindowActive(&window));
+        target->setFocus();
+        QTRY_VERIFY(target->hasFocus());
+        QTest::keyClick(QApplication::focusWidget(), Qt::Key_Escape);
+        QTRY_COMPARE(host.hideCount, 1);
+        QVERIFY(!host.tool->isVisible());
+        QTRY_VERIFY(host.view->hasFocus());
+        client->actionCollection()->action(QStringLiteral("agent_panel_show"))->trigger();
+        QTRY_VERIFY(host.tool->isVisible());
+        QTRY_VERIFY(input->hasFocus());
+        QCOMPARE(host.tool->findChild<QWebEngineView *>(), browser);
+        QCOMPARE(input->toPlainText(), QStringLiteral("Keep this draft"));
+        QCOMPARE(pending->count(), 1);
     }
 
     void pluginIconWithAndWithoutTheme_data()
@@ -642,7 +775,6 @@ $also literal$
         auto client = dynamic_cast<KXMLGUIClient *>(pluginView); QVERIFY(client);
         auto selection = client->actionCollection()->action(QStringLiteral("agent_pending_selection")); QVERIFY(selection);
         QCOMPARE(selection->shortcut(), QKeySequence(QStringLiteral("Ctrl+Alt+S")));
-        auto pending = host.tool->findChild<QListWidget *>(); QVERIFY(pending);
         // The second view appears after the plugin has been created.
         Q_EMIT mainWindow.viewCreated(split);
         split->setSelection(KTextEditor::Range(0, 0, 0, 7));
@@ -652,6 +784,7 @@ $also literal$
         QCOMPARE(menu.actions().size(), 1);
         auto submenu = menu.actions().first()->menu(); QVERIFY(submenu);
         submenu->actions().first()->trigger();
+        auto pending = host.tool->findChild<QListWidget *>(); QVERIFY(pending);
         QCOMPARE(pending->count(), 1);
         auto snapshot = QJsonDocument::fromJson(pending->item(0)->data(Qt::UserRole).toString().toUtf8()).object();
         QCOMPARE(snapshot[QStringLiteral("text")].toString(), QStringLiteral("clicked"));

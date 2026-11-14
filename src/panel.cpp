@@ -149,6 +149,7 @@ AgentPanel::AgentPanel(KTextEditor::MainWindow *window, QWidget *parent)
         remove->setEnabled(!m_pending->selectedItems().isEmpty());
     });
     m_input = new QPlainTextEdit(this);
+    setFocusProxy(m_input);
     m_input->setAccessibleName(i18n("Message to agent"));
     m_input->setPlaceholderText(i18n("Ask the agent…   Ctrl+Enter to send"));
     m_input->setFixedHeight(QFontMetrics(m_input->font()).lineSpacing() * 3 + 8);
