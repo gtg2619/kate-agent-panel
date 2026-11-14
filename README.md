@@ -34,6 +34,25 @@ validation uses Linux; see [testing](docs/testing.md) for the verified environme
 
 ## Build
 
+On Fedora, install the build and runtime dependencies first:
+
+```sh
+sudo dnf install kate git gcc-c++ cmake make ninja-build extra-cmake-modules \
+  qt6-qtbase-devel qt6-qtwebengine-devel qt6-qtwebchannel-devel \
+  kf6-ktexteditor-devel kf6-kcoreaddons-devel kf6-kxmlgui-devel kf6-ki18n-devel \
+  python3
+```
+
+`extra-cmake-modules` provides `ECMConfig.cmake`. The `-devel` packages provide the
+headers and CMake configuration files required to build the plugin.
+
+For tests, also install:
+
+```sh
+sudo dnf install nodejs xorg-x11-server-Xvfb xorg-x11-xauth util-linux \
+  dejavu-sans-fonts google-noto-sans-cjk-fonts
+```
+
 Clone the repository and configure a release build for installation under `~/.local`:
 
 ```sh
