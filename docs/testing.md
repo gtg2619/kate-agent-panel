@@ -24,7 +24,7 @@ Other platforms remain unverified.
 | Sessions | All seven adapter entry points; multiple turns; agent/workspace changes; ACP version negotiation, errors, reload and fallback; ZCode exit-before-ready |
 | Interaction | Permission allow/deny, cancelled and stale replies, unknown client methods, partial tool updates, question conversion |
 | Native editor | Deferred startup, hidden/visible session restore, host palette/layout preservation, load/unload, resize/hide/show, icon fallbacks, shortcuts, split-view context, Pending, failure recovery, file-link clicks |
-| Focus | Esc from composer/transcript/workspace/Pending, dialog dismissal, return to editor, draft/context retention, focus on reopening |
+| Focus | First-click composer focus, Esc from composer/transcript/workspace/Pending, dialog dismissal, return to editor, draft/context retention, focus on reopening |
 | Transcript | Left alignment, collapsed process output, pinned composer, scroll retention, theme/font updates, reload, bounded entries, permission forms |
 | Files | Workspace/absolute/file URLs, Unicode/space/percent paths, line/column/range selection, generated round trips, invalid locations and schemes |
 | Rendering | Four math delimiters, matrices, aligned equations, lists/quotes, streaming, errors, code isolation, nested links, KaTeX fonts, escaped HTML and blocked network access |

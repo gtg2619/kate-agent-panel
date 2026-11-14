@@ -16,6 +16,7 @@
 #include <QStyle>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <QWindow>
 
 class AgentPluginView : public QObject, public KXMLGUIClient
 {
@@ -80,10 +81,16 @@ private:
     }
     void schedulePanel()
     {
+        const auto host = m_tool->window()->windowHandle();
+        const bool focusComposer = host && host->isExposed();
         // Session restoration can show tools while Kate is still constructing its
         // window. Leave that stack before initializing WebEngine and the bridge.
-        QTimer::singleShot(0, this, [this] {
-            if (m_tool && m_tool->isVisible()) ensurePanel();
+        QTimer::singleShot(0, this, [this, focusComposer] {
+            if (!m_tool || !m_tool->isVisible()) return;
+            auto panel = ensurePanel();
+            // A click in an existing window should focus the newly created input.
+            // Restoring a tool during startup must leave the editor's focus alone.
+            if (focusComposer) panel->setFocus();
         });
     }
     AgentPanel *ensurePanel()
@@ -97,6 +104,7 @@ private:
         }
         m_panel = new AgentPanel(m_window, m_tool);
         if (layout->indexOf(m_panel) < 0) layout->addWidget(m_panel);
+        m_panel->show();
         return m_panel;
     }
     void stage(KTextEditor::View *view, bool selection)

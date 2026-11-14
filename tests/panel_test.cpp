@@ -221,8 +221,11 @@ private Q_SLOTS:
         window.resize(900, 450); window.show();
         if (!restoredVisible) {
             QVERIFY(QTest::qWaitForWindowExposed(&window));
+            window.activateWindow();
+            QVERIFY(QTest::qWaitForWindowActive(&window));
             QVERIFY(!host.tool->findChild<QWebEngineView *>());
-            host.showToolView(host.tool);
+            connect(sidebar, &QPushButton::clicked, &host, [&] { host.showToolView(host.tool); });
+            QTest::mouseClick(sidebar, Qt::LeftButton);
         }
         // Session restoration may show the tool before Kate finishes applying its theme.
         QVERIFY(!host.tool->findChild<QWebEngineView *>());
@@ -230,6 +233,11 @@ private Q_SLOTS:
         QTRY_VERIFY(host.tool->findChild<QWebEngineView *>());
         auto browser = host.tool->findChild<QWebEngineView *>();
         QVERIFY(waitForScript(browser, QStringLiteral("getComputedStyle(document.body).backgroundColor === 'rgb(35, 38, 41)'")));
+        if (!restoredVisible) {
+            window.activateWindow();
+            QVERIFY(QTest::qWaitForWindowActive(&window));
+            QTRY_VERIFY(host.tool->findChild<QPlainTextEdit *>()->hasFocus());
+        }
         QCOMPARE(QApplication::palette(), applicationPalette);
         QCOMPARE(window.palette(), dark);
         QVERIFY(sidebar->isVisible());
