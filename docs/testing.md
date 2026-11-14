@@ -18,8 +18,14 @@ commands with fixtures, including when real CLIs are installed on the host.
 Local validation uses Fedora 45, Qt 6.11.2, and KF6 6.31. The CI matrix covers
 Python/Node pairs 3.10/22.15, 3.13/24, and 3.14/26, plus the Fedora 43 native suite.
 The current offline run passes all five CTest suites, including 92 Python tests
-and 36 Qt test cases; the two real-provider Qt cases are opt-in. Other platforms
+and 37 Qt test cases; the two real-provider Qt cases are opt-in. Other platforms
 remain unverified.
+
+First-open regression coverage watches the host's native surface, window ID, and
+surface type while WebEngine is created. The original implementation destroys the
+host surface once; the fixed implementation preserves it. A GNOME/Wayland run also
+observed zero new Kate windows on first open and checked the dark theme, sidebar,
+manual newlines, and Esc. Escape remains local to modal dialogs and menus.
 
 ## Coverage
 

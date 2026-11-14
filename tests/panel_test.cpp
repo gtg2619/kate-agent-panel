@@ -27,6 +27,8 @@
 #include <QMap>
 #include <QPlainTextEdit>
 #include <QPluginLoader>
+#include <QPlatformSurfaceEvent>
+#include <QWindow>
 #include <QPushButton>
 #include <QSignalSpy>
 #include <QScrollBar>
@@ -142,6 +144,29 @@ class PanelTest : public QObject
     }
 
 private Q_SLOTS:
+    void firstOpenPreservesNativeWindow()
+    {
+        class SurfaceEvents : public QObject {
+        public:
+            int destroyed = 0;
+            bool eventFilter(QObject *, QEvent *event) override {
+                if (event->type() == QEvent::PlatformSurface
+                    && static_cast<QPlatformSurfaceEvent *>(event)->surfaceEventType() == QPlatformSurfaceEvent::SurfaceAboutToBeDestroyed) ++destroyed;
+                return false;
+            }
+        } events;
+        QWidget window; auto layout = new QVBoxLayout(&window);
+        auto sidebar = new QPushButton(QStringLiteral("Sidebar"), &window); layout->addWidget(sidebar);
+        Host host; KTextEditor::MainWindow mainWindow(&host);
+        window.resize(900, 550); window.show(); QVERIFY(QTest::qWaitForWindowExposed(&window));
+        const auto native = window.windowHandle(); const auto id = window.winId();
+        native->installEventFilter(&events); const auto surface = native->surfaceType();
+        auto panel = new AgentPanel(&mainWindow, &window); layout->addWidget(panel); panel->show();
+        auto browser = panel->findChild<QWebEngineView *>();
+        QVERIFY(waitForScript(browser, QStringLiteral("typeof agentPanelReceive === 'function'")));
+        QCOMPARE(events.destroyed, 0); QCOMPARE(window.windowHandle(), native); QCOMPARE(window.winId(), id);
+        QCOMPARE(native->surfaceType(), surface); QVERIFY(sidebar->isVisible());
+    }
     void init()
     {
         // Offline tests must never connect to a developer's installed agents.
@@ -383,14 +408,16 @@ private Q_SLOTS:
         input->setPlainText(QStringLiteral("Keep this draft"));
         // Escape in an owned dialog must dismiss the dialog, leaving the panel open.
         if (focusTarget == QLatin1String("composer")) {
+          for (const bool modal : {true, false}) {
             QDialog dialog(host.tool);
-            dialog.setModal(true);
+            dialog.setModal(modal);
             dialog.show(); dialog.activateWindow();
             QVERIFY(QTest::qWaitForWindowActive(&dialog));
             QTest::keyClick(&dialog, Qt::Key_Escape);
             QTRY_VERIFY(!dialog.isVisible());
             QCOMPARE(host.hideCount, 0);
             QVERIFY(host.tool->isVisible());
+          }
         }
         QWidget *target = input;
         if (focusTarget == QLatin1String("transcript")) target = browser;

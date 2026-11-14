@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Keep WebEngine's graphics-surface initialization inside the tool so first opening it does not recreate Kate's window.
 - Match Process headings and expanded content to the small, muted turn-timing text.
 - Defer and coalesce composer resizing outside document editing and repaint callbacks.
 - Measure wrapped text independently and keep the cursor visible after manual newlines.

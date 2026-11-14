@@ -85,6 +85,10 @@ AgentPanel::AgentPanel(KTextEditor::MainWindow *window, QWidget *parent)
     : QWidget(parent), m_window(window), m_process(new QProcess(this))
 {
     setObjectName(QStringLiteral("kateAgentPanel"));
+    // Give this tool its own native surface before WebEngine adds a Quick widget.
+    // RHI initialization can then recreate the tool surface without recreating Kate.
+    setAttribute(Qt::WA_DontCreateNativeAncestors);
+    setAttribute(Qt::WA_NativeWindow);
     auto outer = new QVBoxLayout(this);
     outer->setContentsMargins(4, 4, 4, 4);
     outer->setSpacing(4);

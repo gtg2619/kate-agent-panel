@@ -12,7 +12,7 @@
 #include <QEvent>
 #include <QIcon>
 #include <QMenu>
-#include <QShortcut>
+#include <QKeyEvent>
 #include <QStyle>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -32,12 +32,7 @@ public:
         if (!m_tool) return;
         m_tool->installEventFilter(this);
         if (m_tool->isVisible()) schedulePanel();
-        auto escape = new QShortcut(QKeySequence(Qt::Key_Escape), m_tool);
-        escape->setContext(Qt::WidgetWithChildrenShortcut);
-        connect(escape, &QShortcut::activated, this, [this] {
-            m_window->hideToolView(m_tool);
-            if (auto view = m_window->activeView()) view->setFocus();
-        });
+        qApp->installEventFilter(this);
         setComponentName(QStringLiteral("kateagentpanel"), i18n("Agent Panel"));
         setXMLFile(QStringLiteral(":/agentpanel/ui.rc"));
 
@@ -77,6 +72,24 @@ private:
     bool eventFilter(QObject *object, QEvent *event) override
     {
         if (object == m_tool && event->type() == QEvent::Show && !m_panel) schedulePanel();
+        if (event->type() == QEvent::ShortcutOverride || event->type() == QEvent::KeyPress) {
+            const auto key = static_cast<QKeyEvent *>(event);
+            const auto target = qobject_cast<QWidget *>(object);
+            const auto focus = target ? target : QApplication::focusWidget();
+            // Native tool surfaces must not steal Escape from modal dialogs or menus.
+            if (key->key() == Qt::Key_Escape && key->modifiers() == Qt::NoModifier
+                && m_tool && m_tool->isVisible() && QApplication::activeWindow() == m_tool->window()
+                && focus && focus->window() == m_tool->window()
+                && (focus == m_tool || m_tool->isAncestorOf(focus))
+                && !QApplication::activeModalWidget() && !QApplication::activePopupWidget()) {
+                event->accept();
+                if (event->type() == QEvent::KeyPress) {
+                    m_window->hideToolView(m_tool);
+                    if (auto view = m_window->activeView()) view->setFocus();
+                }
+                return true;
+            }
+        }
         return QObject::eventFilter(object, event);
     }
     void schedulePanel()
