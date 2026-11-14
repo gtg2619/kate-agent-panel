@@ -11,8 +11,9 @@ Node or Qt Test fails test configuration instead of silently omitting a suite.
 Each subprocess test has a deadline and closes its children. CI runs the offline
 suite; no agent package or credential is required.
 
-Local validation uses Fedora 45, Qt 6.11.2, and KF6 6.31. The CI workflow targets
-Python 3.10/3.13 and Fedora 43; remote execution and other platforms are unverified.
+Local validation uses Fedora 45, Qt 6.11.2, and KF6 6.31. GitHub Actions also passed
+the Python 3.10/3.13 unit jobs and the Fedora 43 native suite on 2026-11-14.
+Other platforms remain unverified.
 
 ## Coverage
 
