@@ -101,6 +101,9 @@ function message(event) {
   let entry = entries.get(id);
   if (!entry) {
     if (role === "user") { turn++; processGroup = null; }
+    // Each new visible message ends the previous folded phase. Updates to an
+    // existing tool still patch its original row, preserving expansion state.
+    if (!folded) processGroup = null;
     const group = folded ? processing() : null;
     const node = document.createElement("article");
     node.className = `message ${role}`;

@@ -1086,6 +1086,56 @@ $also literal$
         QVERIFY(panel.grab().save(QStringLiteral(SOURCE_DIR "/build/configuration-preview.png")));
     }
 
+    void acpMultipleBodiesCancelAndRestore()
+    {
+        QTemporaryDir workspace;
+        qputenv("DSH_HOME", workspace.path().toUtf8());
+        qputenv("KATE_AGENT_DEEPSEEK_COMMAND", QByteArray("python3 ") + SOURCE_DIR + "/tests/adversarial_agent.py acp");
+        QVERIFY(QDir().mkpath(workspace.path() + QStringLiteral("/profiles/acp")));
+        QFile config(workspace.path() + QStringLiteral("/profiles/acp/cordis.yml"));
+        QVERIFY(config.open(QIODevice::WriteOnly)); config.write("[]\n"); config.close();
+        QObject project; project.setProperty("projectBaseDir", workspace.path());
+        Host host; host.project = &project; KTextEditor::MainWindow mainWindow(&host);
+        const auto chronology = QStringLiteral(R"JS(
+            [...document.querySelector('#conversation').children].map(el =>
+                el.classList.contains('assistant') ? 'assistant' :
+                el.classList.contains('user') ? 'user' : el.className).join(',')
+        )JS");
+        {
+            AgentPanel panel(&mainWindow); panel.resize(1000, 400); panel.show();
+            auto input = panel.findChild<QPlainTextEdit *>();
+            auto submit = panel.findChild<QToolButton *>(QStringLiteral("agentSubmit"));
+            auto model = panel.findChild<QLineEdit *>(QStringLiteral("agentModelId"));
+            auto agents = panel.findChild<QComboBox *>();
+            auto browser = panel.findChild<QWebEngineView *>();
+            QVERIFY(waitForScript(browser, QStringLiteral("typeof nativePanel !== 'undefined'")));
+            QTRY_VERIFY(agents->isEnabled() && model->isEnabled());
+            QTRY_COMPARE(agents->currentData().toString(), QStringLiteral("deepseek"));
+            input->setPlainText(QStringLiteral("bash")); QTest::keyClick(input, Qt::Key_Return);
+            QVERIFY(waitForScript(browser, QStringLiteral("[...document.querySelectorAll('.assistant .body')].map(el => el.textContent.trim()).join('|') === 'Checking first.|Running Bash.'")));
+            QCOMPARE(evaluate(browser, chronology).toString(), QStringLiteral("user,assistant,process,assistant,process,activity"));
+            QCOMPARE(submit->text(), QStringLiteral("Stop"));
+            QVERIFY(evaluate(browser, QStringLiteral("document.querySelectorAll('.tool').length === 2 && document.querySelector('.tool header').textContent === 'Read · completed' && [...document.querySelectorAll('.process')].every(el => !el.open)")).toBool());
+            // Updating a previous tool must not move it, reopen it, or duplicate it.
+            evaluate(browser, QStringLiteral("document.querySelector('.process summary').click()"));
+            evaluate(browser, QStringLiteral("agentPanelReceive({type:'tool', id:'first-tool', title:'Read', status:'completed', text:'Late update'})"));
+            QVERIFY(waitForScript(browser, QStringLiteral("document.querySelector('.tool .body').textContent === 'Late update'")));
+            QVERIFY(evaluate(browser, QStringLiteral("document.querySelector('.process').open && document.querySelectorAll('.process').length === 2")).toBool());
+            submit->click();
+            QTRY_COMPARE_WITH_TIMEOUT(submit->text(), QStringLiteral("Send"), 8000);
+            QVERIFY(QFile::exists(workspace.path() + QStringLiteral("/cancelled")));
+            QVERIFY(waitForScript(browser, QStringLiteral("!document.querySelector('.activity') && document.querySelector('.turn-summary')?.textContent.includes('Stopped in') && [...document.querySelectorAll('.tool header')].at(-1).textContent === 'Bash · cancelled'")));
+            input->setPlainText(QStringLiteral("after-stop")); QTest::keyClick(input, Qt::Key_Return);
+            QVERIFY(waitForScript(browser, QStringLiteral("document.querySelectorAll('.turn-summary').length === 2 && [...document.querySelectorAll('.assistant .body')].at(-1).textContent.includes(':after-stop')")));
+            QCOMPARE(submit->text(), QStringLiteral("Send"));
+        }
+        AgentPanel restored(&mainWindow); restored.resize(1000, 400); restored.show();
+        auto browser = restored.findChild<QWebEngineView *>();
+        QVERIFY(waitForScript(browser, QStringLiteral("document.querySelectorAll('.turn-summary').length === 2")));
+        QCOMPARE(evaluate(browser, chronology).toString(), QStringLiteral("user,assistant,process,assistant,process,turn-summary,user,assistant,turn-summary"));
+        QVERIFY(evaluate(browser, QStringLiteral("[...document.querySelectorAll('.process')].every(el => !el.open) && !document.querySelector('.activity') && !document.querySelector('#conversation').textContent.includes('in_progress')")).toBool());
+    }
+
     void queuedSendWaitsForConfiguration()
     {
         const auto gate = m_state->filePath(QStringLiteral("prepare-ready"));

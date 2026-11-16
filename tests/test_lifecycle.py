@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import signal
 import sys
 import tempfile
 import unittest
@@ -102,6 +103,8 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 5)
         self.assertFalse(self.bridge.adapter.requests)
         self.assertFalse(self.bridge.adapter.busy)
+        self.assertTrue(Path(self.temp.name, 'permissions-cancelled').exists())
+        self.assertEqual(len([e for e in self.events if e['type'] == 'request']), 1)
         await self.bridge.dispatch({'type':'reply','id':request['id'],'value':'once'})
         self.assertFalse(Path(self.temp.name, 'approved').exists())
         await self.send('after-stop')
@@ -140,6 +143,81 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         await update({'sessionUpdate':'tool_call_update','toolCallId':'read','content':[]})
         self.assertEqual(self.events[-1]['text'], '[]')
         self.assertEqual(self.events[-1]['status'], 'in_progress')
+
+    async def test_acp_message_ids_and_legacy_spans_preserve_multiple_bodies(self):
+        adapter = module.ACPAdapter(self.bridge, 'deepseek', self.temp.name)
+        async def chunk(text, role='agent_message_chunk', **fields):
+            await adapter.handle({'method': 'session/update', 'params': {'update': {
+                'sessionUpdate': role, 'content': {'type': 'text', 'text': text}, **fields}}})
+        await chunk('First ', messageId='first')
+        await chunk('body.', messageId='first')
+        await chunk('Next body.', messageId='second')
+        messages = self.events[:]
+        self.assertEqual(messages[0]['id'], messages[1]['id'])
+        self.assertNotEqual(messages[1]['id'], messages[2]['id'])
+        await chunk('Legacy ')
+        await chunk('stream.')
+        self.assertEqual(self.events[-1]['id'], self.events[-2]['id'])
+        previous = self.events[-1]['id']
+        await chunk('Inspecting.', 'agent_thought_chunk')
+        await chunk('After reasoning.')
+        self.assertNotEqual(previous, self.events[-1]['id'])
+        previous = self.events[-1]['id']
+        await adapter.handle({'method': 'session/update', 'params': {'update': {
+            'sessionUpdate': 'tool_call', 'toolCallId': 'bash', 'title': 'Bash', 'status': 'in_progress'}}})
+        await chunk('After tool.')
+        self.assertNotEqual(previous, self.events[-1]['id'])
+
+    async def test_stop_cancels_acp_bash_then_resumes_without_stale_tools(self):
+        self.bridge.send_task = asyncio.create_task(self.bridge.dispatch({
+            'type': 'send', 'agent': 'deepseek', 'cwd': self.temp.name, 'text': 'bash'}))
+        await self.until(lambda: any(e.get('title') == 'Bash' for e in self.events))
+        pid = int(Path(self.temp.name, 'bash.pid').read_text())
+        session = self.bridge.adapter.session
+        try:
+            await asyncio.wait_for(self.bridge.dispatch({'type': 'cancel'}), 7)
+            self.assertTrue(Path(self.temp.name, 'cancelled').exists())
+            self.assertFalse(Path(f'/proc/{pid}').exists())
+            tools = [e for e in self.events if e['type'] == 'tool' and e['id'] == 'bash-tool']
+            self.assertEqual(tools[-1]['status'], 'cancelled')
+            self.assertFalse(self.bridge.adapter.busy)
+            self.assertEqual([e for e in self.events if e['type'] == 'status'][-1]['text'], 'Stopped')
+            await self.send('after-stop', 'deepseek')
+            self.assertEqual(self.bridge.adapter.session, session)
+            self.assertTrue(any(e.get('text', '').endswith(':after-stop') for e in self.events))
+        finally:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    async def test_stop_is_bounded_when_detached_child_holds_output_pipes(self):
+        with patch.dict(os.environ, {'KATE_AGENT_PI_COMMAND': fixture('stubborn-pipes')}):
+            await self.send('first', 'pi')
+            await self.until(lambda: any(e.get('text', '').startswith('child_pid=') for e in self.events))
+            pid = int(next(e['text'].split('=')[1] for e in self.events if e.get('text', '').startswith('child_pid=')))
+            try:
+                await asyncio.wait_for(self.bridge.dispatch({'type': 'cancel'}), 6)
+                self.assertIsNotNone(self.bridge.adapter.process.returncode)
+                self.assertFalse(self.bridge.adapter.busy)
+                self.assertFalse(self.bridge.adapter.waiters)
+            finally:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    async def test_unresponsive_acp_cancel_falls_back_and_next_turn_recovers(self):
+        self.bridge.send_task = asyncio.create_task(self.bridge.dispatch({
+            'type': 'send', 'agent': 'kimi', 'cwd': self.temp.name, 'text': 'hang'}))
+        await self.until(lambda: any(e.get('text') == 'waiting' for e in self.events))
+        await asyncio.wait_for(self.bridge.dispatch({'type': 'cancel'}), 7)
+        self.assertFalse(self.bridge.adapter.busy)
+        self.assertFalse(self.bridge.adapter.waiters)
+        self.assertIsNotNone(self.bridge.adapter.process.returncode)
+        self.assertEqual([e for e in self.events if e['type'] == 'status'][-1]['text'], 'Stopped')
+        await self.send('after-timeout')
+        self.assertTrue(any(e.get('text', '').endswith(':after-timeout') for e in self.events))
 
     async def test_unknown_requests_return_method_not_found(self):
         adapter = module.ACPAdapter(self.bridge, 'kimi', self.temp.name)

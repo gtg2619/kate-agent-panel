@@ -17,8 +17,8 @@ commands with fixtures, including when real CLIs are installed on the host.
 
 Local validation uses Fedora 45, Qt 6.11.2, and KF6 6.31. The CI matrix covers
 Python/Node pairs 3.10/22.15, 3.13/24, and 3.14/26, plus the Fedora 43 native suite.
-The current offline run passes all five CTest suites, including 92 Python tests
-and 37 Qt test cases; the two real-provider Qt cases are opt-in. Other platforms
+The current offline run passes all five CTest suites, including 96 Python tests
+and 38 Qt test cases; the two real-provider Qt cases are opt-in. Other platforms
 remain unverified.
 
 First-open regression coverage watches the host's native surface, window ID, and
@@ -32,13 +32,13 @@ manual newlines, and Esc. Escape remains local to modal dialogs and menus.
 | Layer | Checks |
 |---|---|
 | Discovery | DSH priority, unavailable-agent fallback, resume precedence, command overrides, argv quoting, malformed overrides, numeric NVM ordering, inherited PATH priority, isolated environments, credential-name-only inventory, existing Harness profile requirement |
-| Transport | Fragmented UTF-8, noisy stdout, oversized records, malformed input, EOF cleanup, busy sends, process-group termination and kill escalation |
+| Transport | Fragmented UTF-8, noisy stdout, oversized records, malformed input, EOF cleanup, busy sends, ACP cancellation, permission races, unresponsive cancellation, process-group termination, kill escalation, inherited-pipe shutdown |
 | Sessions | All seven adapters; persistent turns; canonical workspace filtering; read-only metadata imports; cache restart; New Chat; unavailable agents; stale discovery; ACP capability-dependent resume; UTF-8 history limits |
 | Parameters | Native default readback, queued sends during blocked preparation, idle model/effort edits, rejected-value recovery, native changes overriding cached settings, session persistence, ACP updates and legacy model IDs, Codex empty-thread recreation, ZCode model-default reasoning |
 | Interaction | Single/multiple/custom/secret answers, required fields, typed values, dismiss, failed-write retry, permissions, Codex MCP elicitation, server-resolved requests, DSH socket/hook lifecycle, special-character helper paths, existing Node preloads |
 | Native editor | Deferred startup, hidden/visible session restore, host palette/layout preservation, load/unload, resize/hide/show, icon fallbacks, shortcuts, split-view context, Pending, failure recovery, file-link clicks |
 | Focus | First-click composer focus, Esc from composer/transcript/workspace/Pending, dialog dismissal, return to editor, draft/context retention, focus on reopening |
-| Transcript | Console prompt/body alignment at multiple font sizes, collapsed process output, visible errors, pinned one/two-line composer, inline Send/Stop, small muted working/elapsed text, Enter/Ctrl+Enter, IME protection, scroll retention, theme/font updates, reload, restored history, local-session dialog |
+| Transcript | Console prompt/body alignment at multiple font sizes, ACP message IDs and legacy chunks, chronological process groups, late tool updates, visible errors, pinned one/two-line composer, inline Send/Stop, small muted working/elapsed text, Enter/Ctrl+Enter, IME protection, scroll retention, theme/font updates, reload, restored history, local-session dialog |
 | Workspace | Active Kate project, local file directory, HOME fallback, New Chat after a manual directory override |
 | Composer regression | Repeated Ctrl+Enter in existing multiline text, cursor visibility, undo/redo, wrap thresholds, padded styles, font fallback, bounded repaint activity, distinct icons and readable completion hints |
 | Timing | Monotonic wall time, overlapping tool union, user-input waits, zero-duration turns, stop/error outcomes, one persisted summary per turn |
@@ -68,6 +68,12 @@ the fix removes synchronous resizing from document/repaint callbacks and tests
 cursor visibility after repeated manual line breaks.
 
 Unicode cases use escaped data; project UI, documentation, and test descriptions are English.
+
+The Stop regression was reproduced against the old implementation on Python 3.13:
+an agent ignoring SIGTERM and a detached child retaining its output pipes left
+`Process.wait()` blocked after SIGKILL. The fixed teardown passes on Python 3.13
+and 3.15. Native coverage sends multiple assistant bodies around tool calls, stops
+a running Bash fixture, sends another turn, and reopens the persisted conversation.
 
 ## Live tests
 
@@ -99,8 +105,14 @@ Kimi's real ACP initialization/config surface and workspace-filtered session lis
 were checked. Codex 0.167.2 protocol types, Pi 1.5.0 RPC types, Claude's control
 messages, and current upstream Kimi/ZCode/DSH/Hermes implementations informed the
 fixtures. Hermes was not installed. Other real-provider conversations, live write
-approvals, and live cancellation remain unverified. Fixtures do not establish
+approvals, and cancellation with other providers remain unverified. Fixtures do not establish
 compatibility with every CLI version.
+
+Verified on 2026-11-16 with DSH 0.2.2-rc.1 and DeepSeek V4 Flash: three distinct
+assistant messages around two Bash calls, cancellation of a real `sleep 30` tool
+in 58 ms with no surviving child, and a successful next prompt in the same session.
+The probe used a temporary workspace and the existing ACP profile without changing
+CLI configuration. It does not establish the cause of every long-running Bash call.
 
 Cached-session tests hold native discovery indefinitely and verify that history is
 restored first. The selected CLI then connects asynchronously to read its effective
@@ -130,5 +142,8 @@ Reviewed on 2026-11-14. These informed our tests; no upstream suite is being cla
 | [Hermes ACP adapter](https://github.com/NousResearch/hermes-agent/tree/main/acp_adapter) | Verify persisted-session scope and unsupported settings rather than assuming parity |
 
 ACP-TCK tests agents; this repository tests an editor client with controlled agent
-fixtures. It is not an ACP conformance certification. Our Stop action terminates the
-process group; it does not implement graceful `session/cancel` negotiation.
+fixtures. It is not an ACP conformance certification. Stop gives ACP's
+[`session/cancel`](https://agentclientprotocol.com/protocol/v1/prompt-turn#cancellation)
+two seconds to settle, then tears down the transport with bounded TERM/KILL and
+pipe cleanup. A response body alone never completes a turn; the correlated prompt
+response remains authoritative.

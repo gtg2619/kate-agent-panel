@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Preserve separate ACP response messages and place each new Process group after the preceding response.
+- Send ACP cancellation before shutdown, dismiss pending permissions, and clear interrupted tool states.
+- Bound process and pipe cleanup so Stop can finish even when a child retains stdout or stderr.
+- Test multi-message Bash turns, cancellation fallback, history restoration, and Python 3.13 pipe teardown.
 - Keep WebEngine's graphics-surface initialization inside the tool so first opening it does not recreate Kate's window.
 - Match Process headings and expanded content to the small, muted turn-timing text.
 - Defer and coalesce composer resizing outside document editing and repaint callbacks.

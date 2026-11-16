@@ -108,7 +108,8 @@ To uninstall this user installation, remove
    **Ctrl+Enter** for a new line. The composer grows from one to two visible lines.
    You can prepare the next draft while a turn runs.
    The button to the right of the input switches between **Send** and **Stop**.
-   **Stop** terminates this panel's agent process group. The toolbar's restore button
+   **Stop** asks ACP agents to cancel their tools, then closes the agent process group
+   with a bounded shutdown timeout. The toolbar's restore button
    recovers the last input after a failed send.
 4. Click a file reference to open the file and select its lines. Permissions and
    agent questions require an explicit response.

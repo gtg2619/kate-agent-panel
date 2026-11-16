@@ -21,7 +21,8 @@ def wait_for_prompt():
             return
 
 if mode == 'oversize':
-    print('x' * 4096, flush=True)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    print('x' * (4 * 1024 * 1024), flush=True)
     time.sleep(300)
 elif mode == 'stderr':
     wait_for_prompt()
@@ -35,10 +36,11 @@ elif mode == 'noise':
         os.write(1, record)
     emit({'type': 'agent_settled'})
     sys.stdin.read()
-elif mode == 'stubborn':
+elif mode in ('stubborn', 'stubborn-pipes'):
     wait_for_prompt()
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
-    child = subprocess.Popen([sys.executable, '-c', 'import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(300)'])
+    child = subprocess.Popen([sys.executable, '-c', 'import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(300)'],
+                             start_new_session=mode == 'stubborn-pipes')
     emit({'type': 'extension_ui_request', 'method': 'notify', 'message': f'child_pid={child.pid}'})
     time.sleep(300)
 elif mode == 'exit':
@@ -48,6 +50,9 @@ elif mode == 'stall':
 elif mode == 'acp':
     session = f'session-{os.getpid()}'
     pending = None
+    child = None
+    cancelled_answers = 0
+    cancel_requested = False
     for raw in sys.stdin:
         data = json.loads(raw)
         method, params = data.get('method'), data.get('params', {})
@@ -66,6 +71,20 @@ elif mode == 'acp':
         elif method == 'session/prompt':
             assert params['sessionId'] == session
             text = params['prompt'][0]['text']
+            if text == 'bash':
+                pending = data['id']
+                child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], start_new_session=True)
+                Path('bash.pid').write_text(str(child.pid))
+                for update in [
+                    {'sessionUpdate': 'agent_message_chunk', 'messageId': 'first', 'content': {'type': 'text', 'text': 'Checking first.'}},
+                    {'sessionUpdate': 'tool_call', 'toolCallId': 'first-tool', 'title': 'Read', 'status': 'in_progress'},
+                    {'sessionUpdate': 'agent_message_chunk', 'messageId': 'second', 'content': {'type': 'text', 'text': 'Running '}},
+                    {'sessionUpdate': 'tool_call_update', 'toolCallId': 'first-tool', 'status': 'completed'},
+                    {'sessionUpdate': 'agent_message_chunk', 'messageId': 'second', 'content': {'type': 'text', 'text': 'Bash.'}},
+                    {'sessionUpdate': 'tool_call', 'toolCallId': 'bash-tool', 'title': 'Bash', 'status': 'in_progress'},
+                ]:
+                    emit({'method': 'session/update', 'params': {'sessionId': session, 'update': update}})
+                continue
             if text == 'hang':
                 emit({'method': 'session/update', 'params': {'update': {'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': 'waiting'}}}})
                 continue
@@ -80,8 +99,29 @@ elif mode == 'acp':
             emit({'method': 'session/update', 'params': {'sessionId': session, 'update': {
                 'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': session + ':' + text}}}})
             emit({'id': data['id'], 'result': {'stopReason': 'end_turn'}})
-        elif data.get('id') == 'permission':
+        elif method == 'session/cancel':
+            assert 'id' not in data and params['sessionId'] == session
+            if pending is not None:
+                if child is not None:
+                    child.terminate(); child.wait(timeout=2)
+                    child = None
+                else:
+                    cancel_requested = True
+                    emit({'id': 'late-permission', 'method': 'session/request_permission', 'params': {
+                        'toolCall': {'title': 'Permission racing Stop'}, 'options': [{'optionId': 'once', 'name': 'Allow once', 'kind': 'allow_once'}]}})
+                    continue
+                Path('cancelled').write_text('ACP cancellation received')
+                emit({'id': pending, 'result': {'stopReason': 'cancelled'}})
+                pending = None
+        elif data.get('id') in ('permission', 'late-permission'):
             outcome = data['result']['outcome']['outcome']
             if outcome == 'selected':
                 Path('approved').write_text('explicit permission')
-            emit({'id': pending, 'result': {'stopReason': 'end_turn'}})
+            if cancel_requested:
+                assert outcome == 'cancelled'
+                cancelled_answers += 1
+                if cancelled_answers == 2:
+                    Path('permissions-cancelled').write_text('Pending and late requests cancelled')
+                    emit({'id': pending, 'result': {'stopReason': 'cancelled'}})
+            else:
+                emit({'id': pending, 'result': {'stopReason': 'end_turn'}})

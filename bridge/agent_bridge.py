@@ -217,6 +217,8 @@ class Adapter:
         self.timing = None
         self.restore_native_settings = False
         self.connected = False
+        self.close_lock = asyncio.Lock()
+        self.closed_process = None
 
     def starting_parameters(self):
         return ("", "") if self.restore_native_settings else (self.model, self.effort)
@@ -366,31 +368,52 @@ class Adapter:
         self.status(False, "Stopped")
 
     async def close(self):
-        self.connected = False
-        self.closing = True
-        self.requests.clear()
-        if self.process and self.process.returncode is None:
-            # A separate process group prevents a stopped turn from leaving tool children running.
-            try:
-                os.killpg(self.process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            try:
-                await asyncio.wait_for(self.process.wait(), 2)
-            except asyncio.TimeoutError:
-                try:
-                    os.killpg(self.process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                await self.process.wait()
-        for task in self.tasks:
-            if task is not asyncio.current_task():
+        async with self.close_lock:
+            self.connected = False
+            self.closing = True
+            self.requests.clear()
+            readers = [t for t in self.tasks if t is not asyncio.current_task()]
+            for task in readers:
                 task.cancel()
-        await asyncio.gather(*[t for t in self.tasks if t is not asyncio.current_task()], return_exceptions=True)
-        for future in self.waiters.values():
-            if not future.done():
-                future.set_exception(RuntimeError("Session closed"))
-        self.waiters.clear()
+            await asyncio.gather(*readers, return_exceptions=True)
+            process = self.process
+            try:
+                if process and process is not self.closed_process:
+                    def signal_group(sig):
+                        try:
+                            os.killpg(process.pid, sig)
+                        except ProcessLookupError:
+                            pass
+
+                    async def discard(reader):
+                        while await reader.read(65536):
+                            pass
+
+                    # Drain pipes during shutdown, including oversized records that
+                    # stopped the protocol reader. Descendants may outlive the leader.
+                    drains = [asyncio.create_task(discard(r)) for r in (process.stdout, process.stderr)]
+                    try:
+                        signal_group(signal.SIGTERM)
+                        try:
+                            await asyncio.wait_for(process.wait(), 2)
+                        except asyncio.TimeoutError:
+                            pass
+                    finally:
+                        signal_group(signal.SIGKILL)
+                        # asyncio has no public Process.close(). On Python 3.13,
+                        # wait() can await pipe EOF even after SIGKILL; a detached
+                        # tool inheriting a pipe must not hold the editor hostage.
+                        process._transport.close()
+                        for task in drains:
+                            task.cancel()
+                        await asyncio.gather(*drains, return_exceptions=True)
+                        await asyncio.wait_for(process.wait(), 1)
+                        self.closed_process = process
+            finally:
+                for future in self.waiters.values():
+                    if not future.done():
+                        future.set_exception(RuntimeError("Session closed"))
+                self.waiters.clear()
 
     def session_ready(self):
         self.connected = True
@@ -520,8 +543,12 @@ class ACPAdapter(Adapter):
         self.replaying = False
         self.question_writer = None
         self.question_ready = False
+        self.chunk_role = None
+        self.chunk_id = ""
+        self.cancelling = False
 
     async def launch_acp(self):
+        self.cancelling = False
         if self.agent != "deepseek":
             await self.launch(["acp"])
             return
@@ -559,13 +586,19 @@ class ACPAdapter(Adapter):
 
     async def close(self):
         await super().close()
-        if self.question_writer:
-            self.question_writer.close()
+        writer, self.question_writer = self.question_writer, None
+        if writer:
+            writer.close()
             try:
-                await self.question_writer.wait_closed()
-            except OSError:
-                pass
-            self.question_writer = None
+                await asyncio.wait_for(writer.wait_closed(), 1)
+            except (OSError, asyncio.TimeoutError):
+                writer.transport.abort()
+        self.question_ready = False
+        # Some agents acknowledge cancellation without sending final tool updates.
+        for key, tool in self.tools.items():
+            if tool["status"] not in ("done", "completed", "failed", "cancelled", "error"):
+                tool["status"] = "cancelled"
+                self.emit("tool", id=key, **tool)
 
     async def connect(self):
         if not self.process or self.process.returncode is not None:
@@ -670,6 +703,8 @@ class ACPAdapter(Adapter):
     async def send(self, text):
         await self.connect()
         self.turn = uuid.uuid4().hex
+        self.chunk_role = None
+        self.cancelling = False
         result = await self.rpc_prompt(text)
         reason = str(result.get("stopReason", "end_turn"))
         status = {"end_turn": "Ready", "cancelled": "Stopped", "max_tokens": "Token limit reached",
@@ -685,9 +720,37 @@ class ACPAdapter(Adapter):
         try:
             await self.write(dict(jsonrpc="2.0", id=key, method="session/prompt",
                                   params={"sessionId": self.session, "prompt": [{"type": "text", "text": text}]}))
-            return await future
+            return await asyncio.shield(future)
+        except asyncio.CancelledError:
+            # Give the agent a bounded chance to cancel Bash/terminal processes
+            # in its own process groups and persist the interrupted turn.
+            async def interrupt():
+                self.cancelling = True
+                await self.write(dict(jsonrpc="2.0", method="session/cancel", params={"sessionId": self.session}))
+                for token in list(self.requests):
+                    if token in self.requests:
+                        await self.reply(token, {"_cancel": True})
+                        self.emit("request_resolved", id=token)
+                await asyncio.shield(future)
+            try:
+                await asyncio.wait_for(interrupt(), 2)
+            except (OSError, RuntimeError, asyncio.TimeoutError):
+                pass
+            raise
         finally:
             self.waiters.pop(key, None)
+            if not future.done():
+                future.cancel()
+
+    async def ask(self, key, title, options=None, questions=None, **context):
+        if not self.cancelling:
+            return await super().ask(key, title, options, questions, **context)
+        # Permission/choice requests may already be in flight when Stop is sent.
+        token = uuid.uuid4().hex
+        if questions:
+            context["questions"] = questions
+        self.requests[token] = (key, context)
+        await self.reply(token, {"_cancel": True})
 
     async def handle(self, data):
         method, params = data.get("method", ""), data.get("params", {})
@@ -700,8 +763,20 @@ class ACPAdapter(Adapter):
                 role = "reasoning" if kind == "agent_thought_chunk" else "assistant"
                 content = update.get("content", {})
                 if content.get("type") == "text":
-                    self.message(f"{self.turn}:{role}", content.get("text", ""), role, True)
+                    message_id = update.get("messageId")
+                    if isinstance(message_id, str) and message_id:
+                        key = f"message:{message_id}"
+                        self.chunk_role = None
+                    else:
+                        # Older ACP agents omit messageId. Consecutive chunks form
+                        # one message until reasoning or tool activity separates them.
+                        if role != self.chunk_role:
+                            self.chunk_id = uuid.uuid4().hex
+                        self.chunk_role = role
+                        key = f"span:{self.chunk_id}"
+                    self.message(f"{self.turn}:{role}:{key}", content.get("text", ""), role, True)
             elif kind in ("tool_call", "tool_call_update"):
+                self.chunk_role = None
                 key = update.get("toolCallId", "tool")
                 tool = self.tools.setdefault(key, {"title": "Tool", "text": "{}", "status": "pending"})
                 for field in ("title", "status"):
