@@ -1267,7 +1267,7 @@ class Bridge:
             selected = next((i for i in items if i["id"] == last and i["agent"] in available), None)
             if last is None:
                 selected = next((i for i in items if i["agent"] in available), None)
-            elif last and not selected:
+            elif last and any(i["id"] == last for i in items) and not selected:
                 self.emit(dict(type="message", id=uuid.uuid4().hex, role="notice",
                     text="The previous session's CLI is unavailable. Select an installed agent or check Local Sessions."))
             if selected:
@@ -1275,7 +1275,8 @@ class Bridge:
                     if self.sessions_request == request_id and self.session_epoch == epoch:
                         await self.resume(dict(cwd=cwd, id=selected["id"], requestId=request_id))
         # A known choice (including New Chat) must not wait for CLI metadata scans.
-        early = self.store.last(cwd) is not None
+        last = self.store.last(cwd)
+        early = last == "" or any(item["id"] == last for item in cached)
         if early:
             await restore(cached)
             self.emit(dict(type="sessions_complete", requestId=request_id, cwd=cwd))
@@ -1296,11 +1297,15 @@ class Bridge:
                         for item in data if isinstance(data, list) else data.get("sessions", []):
                             if not isinstance(item, dict) or item.get("archived"):
                                 continue
+                            counts = [item[key] for key in ("messageCount", "turnCount", "message_count") if isinstance(item.get(key), (int, float))]
+                            if not str(item.get("lastPrompt") or "").strip() and ("lastPrompt" in item or counts) and not any(count > 0 for count in counts):
+                                continue
                             directory = item.get("cwd", item.get("workDir", item.get("workingDirectory", "")))
                             if isinstance(directory, str) and directory and canonical(directory) == cwd:
                                 discovered.append(dict(agent="kimi", session=item.get("sessionId", item.get("id")), cwd=cwd,
                                     title=item.get("title") or item.get("lastPrompt") or item.get("sessionId", item.get("id", "")),
                                     source=item.get("sessionDir") or item.get("id", "kimi"),
+                                    has_content=True,
                                     updated=timestamp(item.get("updatedAt", item.get("updated_at", 0)))))
                 except (OSError, ValueError, TypeError, AttributeError, asyncio.TimeoutError):
                     pass

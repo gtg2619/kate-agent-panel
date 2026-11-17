@@ -48,11 +48,85 @@ class StoreTests(unittest.TestCase):
         self.assertIsNone(self.store.last(self.root))
 
     def test_history_limits_and_concurrent_stores(self):
-        self.store.save(self.item(), [{'type': 'message', 'text': str(i)} for i in range(300)])
+        self.store.save(self.item(), [{'type': 'message', 'role': 'user', 'text': str(i)} for i in range(300)])
         other = SessionStore(self.root / 'panel')
         self.assertEqual(other.get(other.list(self.cwd)[0]['id'], self.cwd)['history'][0]['text'], '100')
         other.save(self.item('second'))
-        self.assertEqual(len(self.store.list(self.cwd)), 2)
+        self.assertEqual(len(self.store.list(self.cwd)), 1)  # Metadata-only sessions stay hidden.
+
+    def test_unused_sessions_and_configuration_noise_stay_hidden(self):
+        empty = self.store.save(self.item('empty'), select=True)
+        self.store.save(self.item('setup'), [dict(type='message', role='diagnostic', text='Connected'), dict(type='error', text='Configuration failed')], select=True)
+        self.store.save(self.item('placeholder'), [dict(type='message', role='assistant', text='  ')])
+        self.assertEqual(self.store.list(self.cwd), [])
+        self.assertIsNone(self.store.last(self.cwd))
+        self.assertEqual(self.store.get(empty, self.cwd)['session'], 'empty')  # Filter, never delete.
+        key = self.store.save(self.item('empty'), [dict(type='message', role='user', text='An interrupted first prompt')], select=True)
+        self.assertEqual(key, empty)
+        self.store.save(self.item('empty'), [])  # Activity survives history truncation and metadata updates.
+        self.assertEqual([i['id'] for i in self.store.list(self.cwd)], [key])
+        self.assertEqual(self.store.last(self.cwd), key)
+
+    def test_existing_index_migrates_without_losing_history_or_selection(self):
+        history = [dict(type='message', role='assistant', text='An existing reply')]
+        used = self.store.save(self.item('used'), history, select=True)
+        empty = self.store.save(self.item('empty'))
+        with self.store.connect() as db:
+            db.execute('ALTER TABLE sessions DROP COLUMN has_content')
+        reopened = SessionStore(self.root / 'panel')
+        self.assertEqual([i['id'] for i in reopened.list(self.cwd)], [used])
+        self.assertEqual(reopened.last(self.cwd), used)
+        self.assertEqual(reopened.get(used, self.cwd)['history'], history)
+        self.assertEqual(reopened.get(empty, self.cwd)['history'], [])
+
+    def test_native_initialization_only_sessions_are_filtered(self):
+        env = {key: str(self.root / key) for key in ('CODEX_HOME', 'PI_CODING_AGENT_DIR', 'CLAUDE_CONFIG_DIR', 'DSH_HOME', 'ZCODE_STORAGE_DIR', 'HERMES_HOME')}
+        codex = Path(env['CODEX_HOME']); codex.mkdir()
+        with closing(sqlite3.connect(codex / 'state_5.sqlite')) as db, db:
+            db.execute('CREATE TABLE threads(id,cwd,title,updated_at,archived,source,has_user_event,tokens_used)')
+            # Empty recent threads must not push an older used thread past the SQL limit.
+            db.executemany('INSERT INTO threads VALUES(?,?,?,?,?,?,?,?)',
+                [(str(i),str(self.cwd),'New session',100,0,'cli',0,0) for i in range(2100)]
+                + [('used',str(self.cwd),'Used',1,0,'cli',1,0)])
+        for agent,key,folder in [('pi','PI_CODING_AGENT_DIR','sessions/project'),('claude','CLAUDE_CONFIG_DIR','projects/project')]:
+            directory=Path(env[key])/folder; directory.mkdir(parents=True)
+            header=dict(type='session',cwd=str(self.cwd),sessionId='empty',id='empty')
+            (directory/'empty.jsonl').write_text(json.dumps(header)+'\n')
+            header['sessionId']='used'; header['id']='used'
+            (directory/'used.jsonl').write_text(json.dumps(header)+'\n'+json.dumps(dict(type='message',cwd=str(self.cwd),sessionId='used',message=dict(role='user',content='Question'))))
+        dsh=Path(env['DSH_HOME'])/'storages/session_projcache/sessions'; dsh.mkdir(parents=True)
+        for name,count in [('empty',0),('used',1)]:
+            (dsh/(name+'.json')).write_text(json.dumps(dict(record=dict(identity=dict(cwd=str(self.cwd)),rows=dict(title={'val':'New session'},titleInput={'val':{'count':count}},turnBoundary={'val':{'lastTurn':count}})))))
+        zcode=Path(env['ZCODE_STORAGE_DIR'])/'cli/db/db.sqlite'; zcode.parent.mkdir(parents=True)
+        with closing(sqlite3.connect(zcode)) as db, db:
+            db.execute('CREATE TABLE session(id,directory,title,time_updated,time_deleted,parent_id)')
+            db.execute('CREATE TABLE message(session_id,data)')
+            for name in ['empty','used']: db.execute('INSERT INTO session VALUES(?,?,?,?,NULL,NULL)',(name,str(self.cwd),'Title',10))
+            db.execute('INSERT INTO message VALUES(?,?)',('empty',json.dumps({'role':'system'})))
+            db.execute('INSERT INTO message VALUES(?,?)',('used',json.dumps({'role':'user'})))
+        hermes=Path(env['HERMES_HOME'])/'state.db'; hermes.parent.mkdir()
+        with closing(sqlite3.connect(hermes)) as db, db:
+            db.execute('CREATE TABLE sessions(id,source,started_at,cwd,title)')
+            db.execute('CREATE TABLE messages(session_id,role,content)')
+            for name in ['empty','used']: db.execute('INSERT INTO sessions VALUES(?,?,?,?,?)',(name,'acp',1,str(self.cwd),'Title'))
+            db.execute('INSERT INTO messages VALUES(?,?,?)',('empty','system','Instructions'))
+            db.execute('INSERT INTO messages VALUES(?,?,?)',('used','user','Question'))
+        before={p:p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+        with patch.object(Path,'home',return_value=self.root): items=native_sessions(self.cwd,env)
+        self.assertEqual(len(items),6)
+        self.assertEqual({i['agent'] for i in items},{'codex','pi','claude','deepseek','zcode','hermes'})
+        self.assertTrue(all('used' in i['session'] for i in items))
+        self.assertEqual(before,{p:p.read_bytes() for p in self.root.rglob('*') if p.is_file()})
+
+    def test_codex_rollout_initial_context_is_not_a_user_turn(self):
+        root=self.root/'.codex/sessions/2026/11/17'; root.mkdir(parents=True)
+        header=dict(type='session_meta',payload=dict(id='empty',cwd=str(self.cwd)))
+        context=dict(type='response_item',payload=dict(role='user',content=[dict(type='input_text',text='<environment_context>cwd</environment_context>')]))
+        (root/'empty.jsonl').write_text(json.dumps(header)+'\n'+json.dumps(context)+'\n')
+        header['payload']['id']='used'
+        (root/'used.jsonl').write_text(json.dumps(header)+'\n'+json.dumps(dict(type='event_msg',payload=dict(type='user_message',message='Question')))+'\n')
+        with patch.object(Path,'home',return_value=self.root): items=native_sessions(self.cwd,{})
+        self.assertEqual([i['session'] for i in items],['used'])
 
     def test_history_size_is_limited_in_utf8_bytes(self):
         text = '\U0001f680' * (256 * 1024)
@@ -136,6 +210,31 @@ class SessionLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.bridge.adapter)
         self.assertEqual(len(self.store.list(self.cwd)), 1)
 
+    async def test_empty_legacy_selection_is_not_resumed_or_reported_as_missing_cli(self):
+        key=self.store.save(dict(agent='pi',session='unused',cwd=self.cwd,title='Unused'))
+        with self.store.connect() as db: db.execute('INSERT INTO workspaces VALUES(?,?)',(canonical(self.cwd),key))
+        await self.bridge.dispatch(dict(type='sessions',cwd=self.cwd,autoResume=True))
+        self.assertIsNone(self.bridge.adapter)
+        self.assertFalse(any(e.get('role')=='notice' for e in self.events))
+        self.assertEqual(self.store.list(self.cwd),[])
+
+    async def test_migrated_native_selection_waits_for_activity_discovery(self):
+        item=dict(agent='pi',session='native-used',cwd=self.cwd,title='Native conversation',source='native.jsonl')
+        key=self.store.save(item)
+        with self.store.connect() as db: db.execute('INSERT INTO workspaces VALUES(?,?)',(canonical(self.cwd),key))
+        started,release=asyncio.Event(),asyncio.Event()
+        async def scan(*args):
+            if args[0] is module.native_sessions:
+                started.set(); await release.wait(); return [{**item,'has_content':True}]
+            return []
+        with patch.dict(os.environ,{'KATE_AGENT_DISABLE_NATIVE_DISCOVERY':''}), patch.object(module.asyncio,'to_thread',scan), patch.object(module,'command_for',return_value=[]), patch.object(module,'inventory',return_value={'agents':[{'id':'pi','available':True}]}):
+            task=asyncio.create_task(self.bridge.dispatch(dict(type='sessions',cwd=self.cwd,autoResume=True)))
+            await started.wait()
+            self.assertFalse(any(e['type']=='sessions_complete' for e in self.events))
+            release.set(); await task
+        self.assertEqual(self.bridge.adapter.session,'native-used')
+        self.assertTrue(any(e['type']=='resumed' for e in self.events))
+
     async def test_cancelled_discovery_cannot_restore_a_stale_workspace(self):
         self.saved()
         self.store.forget_last(self.cwd)
@@ -199,7 +298,7 @@ class SessionLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_kimi_cli_listing_uses_closed_stdin_and_filters_directory(self):
         script = Path(self.cwd) / 'list.py'
-        script.write_text("import json,sys\nassert sys.argv[1:3]==['session','list']\nassert sys.stdin.read()==''\ncwd=sys.argv[sys.argv.index('--cwd')+1]\nprint(json.dumps([{'id':'native-kimi','workDir':cwd,'lastPrompt':'Recent question','updatedAt':1700000000000},{'id':'other','workDir':'/unrelated'},{'id':'archived','workDir':cwd,'archived':True}]))\n")
+        script.write_text("import json,sys\nassert sys.argv[1:3]==['session','list']\nassert sys.stdin.read()==''\ncwd=sys.argv[sys.argv.index('--cwd')+1]\nprint(json.dumps([{'id':'native-kimi','workDir':cwd,'lastPrompt':'Recent question','updatedAt':1700000000000},{'id':'other','workDir':'/unrelated'},{'id':'empty','workDir':cwd,'title':'New session','lastPrompt':''},{'id':'archived','workDir':cwd,'archived':True}]))\n")
         with patch.dict(os.environ, {'KATE_AGENT_DISABLE_NATIVE_DISCOVERY':'','KATE_AGENT_KIMI_COMMAND':shlex.join([sys.executable,str(script)])}), patch.object(module,'native_sessions',return_value=[]):
             await self.bridge.dispatch(dict(type='sessions',cwd=self.cwd))
         items = self.store.list(self.cwd)

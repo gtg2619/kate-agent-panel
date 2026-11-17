@@ -17,8 +17,8 @@ commands with fixtures, including when real CLIs are installed on the host.
 
 Local validation uses Fedora 45, Qt 6.11.2, and KF6 6.31. The CI matrix covers
 Python/Node pairs 3.10/22.15, 3.13/24, and 3.14/26, plus the Fedora 43 native suite.
-The current offline run passes all five CTest suites, including 96 Python tests
-and 38 Qt test cases; the two real-provider Qt cases are opt-in. Other platforms
+The current offline run passes all five CTest suites, including 102 Python tests
+and the native editor/panel checks; the two real-provider Qt cases are opt-in. Other platforms
 remain unverified.
 
 First-open regression coverage watches the host's native surface, window ID, and
@@ -28,6 +28,12 @@ observed zero new Kate windows on first open and checked the dark theme, sidebar
 manual newlines, and Esc. Escape remains local to modal dialogs and menus.
 
 ## Coverage
+
+Session filtering regressions cover initialization/configuration noise, interrupted first
+prompts, migration of an existing SQLite index, retained selection/history, and native
+Codex/Pi/Claude/DeepSeek/ZCode/Hermes/Kimi metadata. More than 2000 empty Codex threads
+cannot hide an older used thread behind the SQL discovery limit. Native fixture files
+and databases are compared byte for byte to confirm discovery never modifies them.
 
 | Layer | Checks |
 |---|---|
@@ -66,6 +72,26 @@ The multiline composer regression also passed at 200% scaling and in a full Kate
 window on GNOME/Wayland. The reported complete freeze was not reproduced locally;
 the fix removes synchronous resizing from document/repaint callbacks and tests
 cursor visibility after repeated manual line breaks.
+
+### Dock shrinking regression (2026-11-17)
+
+The panel uses a native RHI surface to protect Kate's main window during WebEngine
+initialization. Under Qt/Wayland that child surface can intercept pointer motion
+while dragging the parent dock splitter downward. The Voice Panel fix now also
+applies here: the child surface temporarily becomes transparent to input for an
+ancestor splitter drag, then restores its original flags on release, hide, mouse
+ungrab, deactivation, or plugin teardown. Unrelated splitters are unaffected.
+
+The dock layout also derives its minimum height from the actual controls rather
+than the current/restored ToolView size. It preserves room for the composer and
+Pending while allowing an enlarged dock to shrink again.
+
+The two input-region tests failed before the fix and passed afterwards in an
+isolated headless Mutter/Wayland session. They check release and hide during a
+drag, followed by successful composer input. Repeated enlargement/shrinking and
+draft preservation pass as well. These Wayland cases are skipped under Xvfb; the
+complete five-suite offline run passes under Xvfb, with the live-provider cases
+remaining opt-in.
 
 Unicode cases use escaped data; project UI, documentation, and test descriptions are English.
 

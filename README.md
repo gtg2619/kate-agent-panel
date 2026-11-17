@@ -149,6 +149,13 @@ the last selected session for that directory; on first use, it selects the newes
 available local session. Choosing New Chat prevents that automatic selection until
 another conversation is started or resumed.
 
+Initialization-only and configuration-only sessions are filtered out. A user prompt,
+assistant response or actual tool/turn activity makes a panel session eligible, even if
+the first turn was interrupted. Existing indexes migrate without deleting histories or
+native CLI records. Native importers use conversation flags, messages or turn counters;
+older/unreadable formats with insufficient evidence are retained rather than silently
+discarding a possibly useful conversation. Refresh reloads native activity metadata.
+
 Restoration loads the panel's recent transcript and parameters first. The agent's
 selected CLI connects in the background to read its session configuration, without
 sending a prompt. Native sessions are discovered read-only;

@@ -32,6 +32,7 @@
 #include <QPushButton>
 #include <QSignalSpy>
 #include <QScrollBar>
+#include <QSplitter>
 #include <QScopeGuard>
 #include <QTemporaryDir>
 #include <QTest>
@@ -48,6 +49,8 @@
 class KateToolViewHost : public QFrame
 {
 public:
+    QSize sizeHint() const override { return size(); }
+    QSize minimumSizeHint() const override { return {160, 160}; }
     KateToolViewHost()
     {
         auto box = new QVBoxLayout(this);
@@ -76,6 +79,7 @@ public:
     QPointer<QWidget> tool;
     QPointer<QWidget> shown;
     QWidget *toolParent = nullptr;
+    QSplitter *dock = nullptr;
     QObject *project = nullptr;
     int hideCount = 0;
     bool managedLayout = true;
@@ -103,6 +107,7 @@ public Q_SLOTS:
         toolPosition = position;
         toolIcon = icon;
         tool = managedLayout ? new KateToolViewHost : new QWidget;
+        if (dock) dock->addWidget(tool);
         if (toolParent) {
             tool->setParent(toolParent);
             toolParent->layout()->addWidget(tool);
@@ -306,6 +311,72 @@ private Q_SLOTS:
         delete pluginView;
         QVERIFY(!host.tool);
         delete plugin;
+    }
+
+    void dockCanShrinkAfterGrowth()
+    {
+        Host host;
+        QSplitter dock(Qt::Vertical); dock.setChildrenCollapsible(false);
+        dock.resize(1100, 900);
+        auto editor = new QWidget(&dock); editor->setMinimumHeight(50);
+        host.dock = &dock;
+        KTextEditor::MainWindow mainWindow(&host);
+        QPluginLoader loader(QStringLiteral(PLUGIN_FILE));
+        auto factory = qobject_cast<KPluginFactory *>(loader.instance()); QVERIFY(factory);
+        auto plugin = factory->create<KTextEditor::Plugin>(&host);
+        auto pluginView = plugin->createView(&mainWindow);
+        const auto cleanup = qScopeGuard([&] { delete pluginView; delete plugin; });
+        dock.show(); QVERIFY(QTest::qWaitForWindowExposed(&dock));
+        auto show = dynamic_cast<KXMLGUIClient *>(pluginView)->actionCollection()->action(QStringLiteral("agent_panel_show"));
+        show->trigger();
+        QTRY_VERIFY(host.tool->findChild<QWidget *>(QStringLiteral("kateAgentPanel")));
+        auto panel = host.tool->findChild<QWidget *>(QStringLiteral("kateAgentPanel"));
+        auto input = panel->findChild<QPlainTextEdit *>(); QVERIFY(input);
+        input->setPlainText(QStringLiteral("draft\nsecond line"));
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            dock.setSizes({240, 650}); QTRY_VERIFY(host.tool->height() > 600);
+            dock.setSizes({700, 190}); QTRY_VERIFY(host.tool->height() < 205);
+            QVERIFY(panel->rect().contains(input->geometry()));
+            QCOMPARE(input->toPlainText(), QStringLiteral("draft\nsecond line"));
+        }
+        host.hideToolView(host.tool); show->trigger();
+        dock.setSizes({700, 190}); QTRY_VERIFY(host.tool->height() < 205);
+    }
+
+    void waylandDockDragRestoresInput_data()
+    {
+        QTest::addColumn<bool>("hideDuringDrag");
+        QTest::newRow("release") << false;
+        QTest::newRow("hide") << true;
+    }
+
+    void waylandDockDragRestoresInput()
+    {
+        if (!QGuiApplication::platformName().startsWith(QLatin1String("wayland"))) QSKIP("Wayland input-region regression");
+        QFETCH(bool, hideDuringDrag);
+        Host host; QSplitter dock(Qt::Vertical); dock.resize(1100, 800);
+        new QWidget(&dock); host.dock = &dock;
+        KTextEditor::MainWindow mainWindow(&host);
+        QPluginLoader loader(QStringLiteral(PLUGIN_FILE));
+        auto factory = qobject_cast<KPluginFactory *>(loader.instance()); QVERIFY(factory);
+        auto plugin = factory->create<KTextEditor::Plugin>(&host);
+        auto pluginView = plugin->createView(&mainWindow);
+        const auto cleanup = qScopeGuard([&] { delete pluginView; delete plugin; });
+        dock.show(); QVERIFY(QTest::qWaitForWindowExposed(&dock));
+        auto show = dynamic_cast<KXMLGUIClient *>(pluginView)->actionCollection()->action(QStringLiteral("agent_panel_show"));
+        show->trigger(); dock.setSizes({400, 400});
+        auto panel = host.tool->findChild<QWidget *>(QStringLiteral("kateAgentPanel")); QVERIFY(panel);
+        auto surface = panel->windowHandle(); QVERIFY(surface);
+        QTest::mousePress(dock.handle(1), Qt::LeftButton);
+        QVERIFY(surface->flags().testFlag(Qt::WindowTransparentForInput));
+        if (hideDuringDrag) host.hideToolView(host.tool);
+        else QTest::mouseRelease(dock.handle(1), Qt::LeftButton);
+        QVERIFY(!surface->flags().testFlag(Qt::WindowTransparentForInput));
+        if (hideDuringDrag) { QTest::mouseRelease(dock.handle(1), Qt::LeftButton); show->trigger(); }
+        auto input = panel->findChild<QPlainTextEdit *>(); QVERIFY(input);
+        QTest::mouseClick(input->viewport(), Qt::LeftButton);
+        QTest::keyClicks(input, "still editable");
+        QCOMPARE(input->toPlainText(), QStringLiteral("still editable"));
     }
 
     void startupKeepsHostUntouchedUntilPanelIsShown_data()

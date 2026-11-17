@@ -53,17 +53,74 @@ def records(path, limit=128):
         return
 
 
+def conversation_message(message):
+    """Configuration, notices and empty streamed placeholders are not conversations."""
+    if not isinstance(message, dict) or message.get("role") not in ("user", "assistant"):
+        return False
+    content = message.get("text", message.get("content"))
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        return any(isinstance(part, dict) and (str(part.get("text", "")).strip()
+                   or part.get("type") in ("image", "input_image", "image_url", "tool_use", "tool_call", "audio")) for part in content)
+    return False
+
+
+def log_activity(path, agent):
+    """True/False for observed activity/empty logs, None for unreadable or bounded scans."""
+    try:
+        with Path(path).open("rb") as stream:
+            size = 0
+            for _ in range(128):
+                line = stream.readline(512 * 1024)
+                if not line:
+                    return False
+                size += len(line)
+                if len(line) >= 512 * 1024 or size > 4 * 1024 * 1024:
+                    return None
+                try:
+                    event = json.loads(line)
+                except (ValueError, UnicodeError):
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                message = event.get("message", {})
+                if agent == "codex":
+                    payload = event.get("payload", {})
+                    if not isinstance(payload, dict):
+                        continue
+                    if event.get("type") == "event_msg" and payload.get("type") == "user_message" and payload.get("message"):
+                        return True
+                    message = payload if event.get("type") == "response_item" else {}
+                    text = content_text(message.get("content"))
+                    if message.get("role") == "user" and text.lstrip().startswith(("<environment_context>", "# AGENTS.md instructions")):
+                        continue
+                if conversation_message(message):
+                    return True
+            return None
+    except OSError:
+        return None
+
+
+def history_activity(history):
+    # Old, truncated histories may retain only tool work or a completed turn.
+    return isinstance(history, list) and any(conversation_message(entry)
+        or (isinstance(entry, dict) and entry.get("type") in ("tool", "turn_summary")) for entry in history)
+
+
 def native_sessions(cwd, env):
     """Read metadata only; never modify a CLI database, profile, or log."""
     cwd = canonical(cwd)
     home = Path.home()
     found = []
 
-    def add(agent, session, directory, title="", updated=0, path="", model="", effort=""):
+    def add(agent, session, directory, title="", updated=0, path="", model="", effort="", activity=None):
         if not session or not isinstance(directory, str) or not directory or canonical(directory) != cwd:
             return
+        if activity is False:
+            return
         found.append(dict(agent=agent, session=str(session), cwd=cwd, title=str(title or session)[:160],
-                          updated=timestamp(updated), source=str(path), model=str(model or ""), effort=str(effort or "")))
+                          updated=timestamp(updated), source=str(path), model=str(model or ""), effort=str(effort or ""), has_content=True))
 
     codex = Path(env.get("CODEX_HOME", home / ".codex")).expanduser()
     # SQLite is a fast metadata index; fall back to JSONL on older CLI versions.
@@ -72,12 +129,16 @@ def native_sessions(cwd, env):
         try:
             with closing(sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True, timeout=.2)) as connection:
                 connection.row_factory = sqlite3.Row
-                for row in connection.execute("SELECT * FROM threads WHERE archived=0 ORDER BY updated_at DESC LIMIT 2000"):
+                columns = {row[1] for row in connection.execute("PRAGMA table_info(threads)")}
+                activity = [name for name in ("has_user_event", "tokens_used") if name in columns]
+                used = " AND (" + " OR ".join(f"{name}>0" for name in activity) + ")" if activity else ""
+                for row in connection.execute("SELECT * FROM threads WHERE archived=0" + used + " ORDER BY updated_at DESC LIMIT 2000"):
                     row = dict(row)
                     if str(row.get("source", "")).startswith("subagent"):
                         continue
                     add("codex", row["id"], row["cwd"], row.get("title"), row.get("updated_at"),
-                        row.get("rollout_path", ""), row.get("model"), row.get("reasoning_effort"))
+                        row.get("rollout_path", ""), row.get("model"), row.get("reasoning_effort"),
+                        activity=True if activity else log_activity(row.get("rollout_path", ""), "codex"))
                 indexed = True
         except (sqlite3.Error, OSError, ValueError, KeyError):
             pass
@@ -86,7 +147,7 @@ def native_sessions(cwd, env):
             for item in records(path, 1):
                 data = item.get("payload", {})
                 if item.get("type") == "session_meta" and isinstance(data, dict):
-                    add("codex", data.get("id"), data.get("cwd"), path.stem, modified(path), path)
+                    add("codex", data.get("id"), data.get("cwd"), path.stem, modified(path), path, activity=log_activity(path, "codex"))
 
     pi = Path(env.get("PI_CODING_AGENT_DIR", home / ".pi/agent")).expanduser() / "sessions"
     for path in sorted(pi.glob("*/*.jsonl"), reverse=True)[:2000]:
@@ -100,7 +161,7 @@ def native_sessions(cwd, env):
             message = item.get("message", {})
             if not title and isinstance(message, dict) and message.get("role") == "user":
                 title = content_text(message.get("content"))
-        add("pi", str(path), header["cwd"], title, modified(path), path)
+        add("pi", str(path), header["cwd"], title, modified(path), path, activity=log_activity(path, "pi"))
 
     claude = Path(env.get("CLAUDE_CONFIG_DIR", home / ".claude")).expanduser() / "projects"
     for path in sorted(claude.glob("*/*.jsonl"), reverse=True)[:2000]:
@@ -111,7 +172,7 @@ def native_sessions(cwd, env):
                 break
             message = item.get("message", {})
             title = content_text(message.get("content", "")) if isinstance(message, dict) else ""
-            add("claude", item.get("sessionId", path.stem), item["cwd"], title, modified(path), path)
+            add("claude", item.get("sessionId", path.stem), item["cwd"], title, modified(path), path, activity=log_activity(path, "claude"))
             break
 
     dsh = Path(env.get("DSH_HOME", home / ".dsh")).expanduser()
@@ -123,8 +184,16 @@ def native_sessions(cwd, env):
             identity, rows = record.get("identity", {}), record.get("rows", {})
             title = rows.get("title", "")
             if isinstance(title, dict):
-                title = title.get("title", title.get("value", ""))
-            add("deepseek", path.stem, identity.get("cwd"), title, path.stat().st_mtime, path)
+                title = title.get("val", title.get("title", title.get("value", "")))
+            counters = []
+            for key, field in (("titleInput", "count"), ("turnBoundary", "lastTurn")):
+                value = rows.get(key, {})
+                if isinstance(value, dict):
+                    value = value.get("val", value)
+                    if isinstance(value, dict) and isinstance(value.get(field), (int, float)):
+                        counters.append(value[field])
+            add("deepseek", path.stem, identity.get("cwd"), title, path.stat().st_mtime, path,
+                activity=any(value > 0 for value in counters) if counters else None)
         except (OSError, ValueError, TypeError, AttributeError):
             continue
 
@@ -132,7 +201,9 @@ def native_sessions(cwd, env):
     if zcode.is_file():
         try:
             with closing(sqlite3.connect(zcode.resolve().as_uri() + "?mode=ro", uri=True, timeout=.2)) as connection:
-                for row in connection.execute("SELECT id,directory,title,time_updated FROM session WHERE time_deleted IS NULL AND parent_id IS NULL ORDER BY time_updated DESC LIMIT 2000"):
+                has_messages = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='message'").fetchone()
+                used = " AND EXISTS(SELECT 1 FROM message WHERE session_id=session.id AND CASE WHEN json_valid(data) THEN json_extract(data,'$.role') END IN ('user','assistant'))" if has_messages else ""
+                for row in connection.execute("SELECT id,directory,title,time_updated FROM session WHERE time_deleted IS NULL AND parent_id IS NULL" + used + " ORDER BY time_updated DESC LIMIT 2000"):
                     add("zcode", *row, path=zcode)
         except (sqlite3.Error, OSError):
             pass
@@ -141,7 +212,9 @@ def native_sessions(cwd, env):
         try:
             with closing(sqlite3.connect(hermes.resolve().as_uri() + "?mode=ro", uri=True, timeout=.2)) as connection:
                 connection.row_factory = sqlite3.Row
-                for row in connection.execute("SELECT * FROM sessions WHERE source='acp' ORDER BY started_at DESC LIMIT 2000"):
+                has_messages = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages'").fetchone()
+                used = " AND EXISTS(SELECT 1 FROM messages WHERE session_id=sessions.id AND role IN ('user','assistant') AND length(trim(coalesce(content,'')))>0)" if has_messages else ""
+                for row in connection.execute("SELECT * FROM sessions WHERE source='acp'" + used + " ORDER BY started_at DESC LIMIT 2000"):
                     row = dict(row)
                     meta = row.get("model_config") or {}
                     if isinstance(meta, str):
@@ -214,6 +287,15 @@ class SessionStore:
         with self.connect() as db:
             db.execute("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, agent TEXT NOT NULL, session TEXT NOT NULL, cwd TEXT NOT NULL, title TEXT NOT NULL, updated REAL NOT NULL, model TEXT NOT NULL, effort TEXT NOT NULL, source TEXT NOT NULL, history TEXT NOT NULL DEFAULT '[]', UNIQUE(agent,session,cwd))")
             db.execute("CREATE TABLE IF NOT EXISTS workspaces (cwd TEXT PRIMARY KEY, last_session TEXT)")
+            if "has_content" not in {row[1] for row in db.execute("PRAGMA table_info(sessions)")}:
+                db.execute("ALTER TABLE sessions ADD COLUMN has_content INTEGER NOT NULL DEFAULT 0")
+                for row in db.execute("SELECT id,history FROM sessions WHERE history!='[]'").fetchall():
+                    try:
+                        used = history_activity(json.loads(row["history"]))
+                    except (ValueError, TypeError):
+                        used = False
+                    if used:
+                        db.execute("UPDATE sessions SET has_content=1 WHERE id=?", (row["id"],))
         self.path.chmod(0o600)
 
     @contextmanager
@@ -229,20 +311,23 @@ class SessionStore:
     def save(self, item, history=None, select=False):
         item = {**item, "cwd": canonical(item["cwd"])}
         with self.connect() as db:
-            previous = db.execute("SELECT id FROM sessions WHERE agent=? AND session=? AND cwd=?", (item["agent"], item["session"], item["cwd"])).fetchone()
+            previous = db.execute("SELECT id,has_content FROM sessions WHERE agent=? AND session=? AND cwd=?", (item["agent"], item["session"], item["cwd"])).fetchone()
             key = previous["id"] if previous else item.get("id", uuid.uuid4().hex)
             values = (key, item["agent"], item["session"], canonical(item["cwd"]), str(item.get("title") or item["session"])[:160],
                       item.get("updated", time.time()), item.get("model", ""), item.get("effort", ""), str(item.get("source", "")))
             db.execute("INSERT INTO sessions(id,agent,session,cwd,title,updated,model,effort,source) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,updated=excluded.updated,model=excluded.model,effort=excluded.effort,source=excluded.source", values)
             if history is not None:
                 db.execute("UPDATE sessions SET history=? WHERE id=?", (json.dumps(bounded_history(history), ensure_ascii=False), key))
-            if select:
+            used = bool(item.get("has_content") or (previous and previous["has_content"])
+                        or history_activity(history))
+            db.execute("UPDATE sessions SET has_content=? WHERE id=?", (int(used), key))
+            if select and used:
                 db.execute("INSERT INTO workspaces VALUES(?,?) ON CONFLICT(cwd) DO UPDATE SET last_session=excluded.last_session", (canonical(item["cwd"]), key))
         return key
 
     def list(self, cwd):
         with self.connect() as db:
-            return [dict(row) for row in db.execute("SELECT id,agent,session,cwd,title,updated,model,effort,source FROM sessions WHERE cwd=? ORDER BY updated DESC LIMIT 500", (canonical(cwd),))]
+            return [dict(row) for row in db.execute("SELECT id,agent,session,cwd,title,updated,model,effort,source FROM sessions WHERE cwd=? AND has_content=1 ORDER BY updated DESC LIMIT 500", (canonical(cwd),))]
 
     def get(self, key, cwd):
         with self.connect() as db:

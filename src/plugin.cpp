@@ -12,7 +12,9 @@
 #include <QEvent>
 #include <QIcon>
 #include <QMenu>
+#include <QMouseEvent>
 #include <QKeyEvent>
+#include <QSplitter>
 #include <QStyle>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -62,6 +64,7 @@ public:
 
     ~AgentPluginView() override
     {
+        endDockDrag();
         for (auto menu : std::as_const(m_contextMenus)) delete menu;
         if (m_window->guiFactory()) m_window->guiFactory()->removeClient(this);
         // Tool view is owned by the window; explicitly remove it when the plugin is disabled.
@@ -72,6 +75,30 @@ private:
     bool eventFilter(QObject *object, QEvent *event) override
     {
         if (object == m_tool && event->type() == QEvent::Show && !m_panel) schedulePanel();
+        if (object == m_panel && event->type() == QEvent::LayoutRequest) updateDockMinimum();
+        if (m_dragSurface && ((event->type() == QEvent::MouseButtonRelease
+                && static_cast<QMouseEvent *>(event)->button() == Qt::LeftButton)
+            || event->type() == QEvent::ApplicationDeactivate
+            || (object == m_dragHandle && event->type() == QEvent::UngrabMouse)
+            || (object == m_tool && event->type() == QEvent::Hide)
+            || (m_tool && object == m_tool->window() && event->type() == QEvent::WindowDeactivate))) {
+            endDockDrag();
+        }
+        if (event->type() == QEvent::MouseButtonPress && m_panel && m_tool && m_tool->isVisible()
+            && QGuiApplication::platformName().startsWith(QLatin1String("wayland"))
+            && static_cast<QMouseEvent *>(event)->button() == Qt::LeftButton) {
+            auto handle = qobject_cast<QSplitterHandle *>(object);
+            if (handle && handle->splitter()->isAncestorOf(m_tool) && m_panel->windowHandle()) {
+                endDockDrag();
+                // Same native RHI surface as Voice Panel: on Wayland it can take
+                // pointer motion from the parent splitter when the dock shrinks.
+                // Preserve painting but leave input with the splitter for this drag.
+                m_dragHandle = handle;
+                m_dragSurface = m_panel->windowHandle();
+                m_dragWasTransparent = m_dragSurface->flags().testFlag(Qt::WindowTransparentForInput);
+                m_dragSurface->setFlag(Qt::WindowTransparentForInput, true);
+            }
+        }
         if (event->type() == QEvent::ShortcutOverride || event->type() == QEvent::KeyPress) {
             const auto key = static_cast<QKeyEvent *>(event);
             const auto target = qobject_cast<QWidget *>(object);
@@ -91,6 +118,19 @@ private:
             }
         }
         return QObject::eventFilter(object, event);
+    }
+    void endDockDrag()
+    {
+        if (m_dragSurface) m_dragSurface->setFlag(Qt::WindowTransparentForInput, m_dragWasTransparent);
+        m_dragSurface.clear();
+        m_dragHandle.clear();
+    }
+    void updateDockMinimum()
+    {
+        if (!m_tool || !m_panel) return;
+        // Constrain only the real controls, never ToolView::sizeHint(), which
+        // reflects the current (possibly enlarged/restored) dock dimensions.
+        m_tool->setMinimumHeight(qMax(1, m_panel->layout()->minimumSize().height()));
     }
     void schedulePanel()
     {
@@ -115,9 +155,12 @@ private:
             layout = new QVBoxLayout(m_tool);
             layout->setContentsMargins(0, 0, 0, 0);
         }
+        layout->setSizeConstraint(QLayout::SetNoConstraint);
         m_panel = new AgentPanel(m_window, m_tool);
+        m_panel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Ignored);
         if (layout->indexOf(m_panel) < 0) layout->addWidget(m_panel);
         m_panel->show();
+        updateDockMinimum();
         return m_panel;
     }
     void stage(KTextEditor::View *view, bool selection)
@@ -153,6 +196,9 @@ private:
     QPointer<QWidget> m_tool;
     QPointer<AgentPanel> m_panel;
     QList<QPointer<QMenu>> m_contextMenus;
+    QPointer<QWindow> m_dragSurface;
+    QPointer<QSplitterHandle> m_dragHandle;
+    bool m_dragWasTransparent = false;
 };
 
 class AgentPlugin : public KTextEditor::Plugin
